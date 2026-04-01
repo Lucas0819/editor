@@ -19,6 +19,7 @@ import {
   layerNameToLevelIndex,
   type UnmatchedLayersMode,
 } from './layer-level.ts'
+import { snapPlanSegmentsToAxis } from './axis-snap.ts'
 import {
   insUnitsToMetersFactor,
   type PlanSegment,
@@ -50,6 +51,11 @@ function parseArgs(argv: string[]) {
   let unmatchedLayers: UnmatchedLayersMode = 'skip'
   /** 0 = disabled. Set explicitly to cap segment length (meters), e.g. to filter site bounds. */
   let maxSegmentLengthM = 0
+  /**
+   * In meter space, if |Δy| (or |Δx|) is below this, snap segment to horizontal (or vertical).
+   * Reduces wall/render glitches from tiny DXF float drift on axis-aligned edges. 0 = off.
+   */
+  let axisSnapToleranceM = 1e-4
 
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -91,6 +97,14 @@ function parseArgs(argv: string[]) {
       if (!Number.isFinite(maxSegmentLengthM) || maxSegmentLengthM < 0) {
         maxSegmentLengthM = 0
       }
+    } else if (a === '--axis-snap-tolerance-m') {
+      const next = argv[i + 1]
+      if (next && !next.startsWith('-')) {
+        axisSnapToleranceM = Number.parseFloat(argv[++i] ?? '0')
+      }
+      if (!Number.isFinite(axisSnapToleranceM) || axisSnapToleranceM < 0) {
+        axisSnapToleranceM = 0
+      }
     }
   }
 
@@ -107,6 +121,7 @@ function parseArgs(argv: string[]) {
     layerFloorOneBased,
     unmatchedLayers,
     maxSegmentLengthM,
+    axisSnapToleranceM,
   }
 }
 
@@ -179,6 +194,7 @@ function buildSceneGraph(
     layerFloorOneBased: boolean
     unmatchedLayers: UnmatchedLayersMode
     maxSegmentLengthM: number
+    axisSnapToleranceM: number
   },
 ): SceneGraph {
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
@@ -314,6 +330,9 @@ function buildSceneGraph(
   if (opts.maxSegmentLengthM > 0) {
     siteMeta.maxSegmentLengthM = opts.maxSegmentLengthM
   }
+  if (opts.axisSnapToleranceM > 0) {
+    siteMeta.axisSnapToleranceM = opts.axisSnapToleranceM
+  }
   if (skippedLong > 0) {
     siteMeta.skippedSegmentsLongerThanM = skippedLong
   }
@@ -363,11 +382,23 @@ async function main() {
   console.error(`Reading ${inputPath} …`)
   const text = await readFile(inputPath, 'utf8')
   console.error('Parsing DXF …')
-  const { header, segments } = parseDxfPlanSegments(text)
+  const { header, segments: rawSegments } = parseDxfPlanSegments(text)
+  const scale = args.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
+  const segments = snapPlanSegmentsToAxis(
+    rawSegments,
+    header.extMin.x,
+    header.extMin.y,
+    scale,
+    args.offset,
+    args.axisSnapToleranceM,
+  )
   console.error(
-    `INSUNITS=${header.insUnits} → scale ${args.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)} m/unit, EXTMIN (${header.extMin.x}, ${header.extMin.y})`,
+    `INSUNITS=${header.insUnits} → scale ${scale} m/unit, EXTMIN (${header.extMin.x}, ${header.extMin.y})`,
   )
   console.error(`Segments (LINE+LWPOLYLINE edges): ${segments.length}`)
+  if (args.axisSnapToleranceM > 0) {
+    console.error(`Axis snap (m): ${args.axisSnapToleranceM} — nearly horizontal/vertical edges aligned to axes`)
+  }
 
   const scene = buildSceneGraph(segments, header, {
     maxWalls: args.maxWalls,
@@ -380,6 +411,7 @@ async function main() {
     layerFloorOneBased: args.layerFloorOneBased,
     unmatchedLayers: args.unmatchedLayers,
     maxSegmentLengthM: args.maxSegmentLengthM,
+    axisSnapToleranceM: args.axisSnapToleranceM,
   })
 
   const wallCount = Object.keys(scene.nodes).filter(

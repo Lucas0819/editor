@@ -35,6 +35,7 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--layer-regex` | 按**图层名**拆成多个 `Level`。下一参数为正则字符串，**第一个捕获组**为楼层数字；若省略参数则默认 `图层\s*(\d+)`（匹配「图层 1」…「图层 7」） |
 | `--layer-floor-zero-based` | 与 `--layer-regex` 连用：捕获组表示 **0 起算的 level 序号**（默认是 **1 起算楼层**：`1`→`level` 字段 `0`） |
 | `--unmatched-layers` | `skip`（默认）：不匹配图层的线段丢弃；`level0`：归入第 0 层 |
+| `--axis-snap-tolerance-m` | 在**米制**下：纵向偏差小于容差则视为水平并拉直；横向同理视为垂直。默认 `0.0001`（0.1 mm）；传 `0` 关闭 |
 
 不传 `--layer-regex` 时仍为**单层**（所有墙在同一 `Level`）。
 
