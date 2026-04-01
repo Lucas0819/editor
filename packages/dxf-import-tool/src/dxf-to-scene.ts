@@ -15,6 +15,11 @@ import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import {
+  compileLayerRegex,
+  layerNameToLevelIndex,
+  type UnmatchedLayersMode,
+} from './layer-level.ts'
+import {
   insUnitsToMetersFactor,
   type PlanSegment,
   parseDxfPlanSegments,
@@ -38,6 +43,13 @@ function parseArgs(argv: string[]) {
   let wallThickness = 0.15
   let offset = true
   let scaleOverride: number | null = null
+  /** If set, split walls across multiple Level nodes by layer name (first regex capture = floor). */
+  let layerRegexSource: string | null = null
+  /** If true (default), capture 1 → Pascal level 0; if false, capture is already 0-based level index. */
+  let layerFloorOneBased = true
+  let unmatchedLayers: UnmatchedLayersMode = 'skip'
+  /** 0 = disabled. Set explicitly to cap segment length (meters), e.g. to filter site bounds. */
+  let maxSegmentLengthM = 0
 
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -57,6 +69,28 @@ function parseArgs(argv: string[]) {
       offset = false
     } else if (a === '--scale-to-meters') {
       scaleOverride = Number.parseFloat(argv[++i] ?? '') || null
+    } else if (a === '--layer-regex') {
+      const next = argv[i + 1]
+      if (next && !next.startsWith('-')) {
+        layerRegexSource = argv[++i] ?? ''
+      } else {
+        layerRegexSource = String.raw`图层\s*(\d+)`
+      }
+    } else if (a === '--layer-floor-zero-based') {
+      layerFloorOneBased = false
+    } else if (a === '--unmatched-layers') {
+      const v = argv[++i]
+      if (v === 'skip' || v === 'level0') {
+        unmatchedLayers = v
+      }
+    } else if (a === '--max-segment-length-m') {
+      const next = argv[i + 1]
+      if (next && !next.startsWith('-')) {
+        maxSegmentLengthM = Number.parseFloat(argv[++i] ?? '0')
+      }
+      if (!Number.isFinite(maxSegmentLengthM) || maxSegmentLengthM < 0) {
+        maxSegmentLengthM = 0
+      }
     }
   }
 
@@ -69,6 +103,10 @@ function parseArgs(argv: string[]) {
     wallThickness,
     offset,
     scaleOverride,
+    layerRegexSource: layerRegexSource?.trim() || null,
+    layerFloorOneBased,
+    unmatchedLayers,
+    maxSegmentLengthM,
   }
 }
 
@@ -137,53 +175,109 @@ function buildSceneGraph(
     wallThickness: number
     offset: boolean
     scaleOverride: number | null
+    layerRegexSource: string | null
+    layerFloorOneBased: boolean
+    unmatchedLayers: UnmatchedLayersMode
+    maxSegmentLengthM: number
   },
 ): SceneGraph {
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
   const ox = header.extMin.x
   const oy = header.extMin.y
 
-  const used: PlanSegment[] = []
+  const layerRegex = opts.layerRegexSource ? compileLayerRegex(opts.layerRegexSource) : null
+
+  type Tagged = { seg: PlanSegment; levelIndex: number }
+  const tagged: Tagged[] = []
+  let skippedLong = 0
   for (const s of segments) {
-    if (used.length >= opts.maxWalls) {
+    if (tagged.length >= opts.maxWalls) {
       break
     }
-    if (segmentLengthM(s, ox, oy, scale, opts.offset) >= opts.minLenM) {
-      used.push(s)
+    const lenM = segmentLengthM(s, ox, oy, scale, opts.offset)
+    if (lenM < opts.minLenM) {
+      continue
     }
+    if (opts.maxSegmentLengthM > 0 && lenM > opts.maxSegmentLengthM) {
+      skippedLong++
+      continue
+    }
+
+    let levelIndex = 0
+    if (layerRegex) {
+      let idx = layerNameToLevelIndex(s.layer, layerRegex, opts.layerFloorOneBased)
+      if (idx === null) {
+        if (opts.unmatchedLayers === 'skip') {
+          continue
+        }
+        idx = 0
+      }
+      levelIndex = idx
+    }
+    tagged.push({ seg: s, levelIndex })
   }
 
-  const wallIds: string[] = []
-  const nodes: Record<string, unknown> = {}
+  const byLevel = new Map<number, PlanSegment[]>()
+  for (const { seg, levelIndex } of tagged) {
+    const list = byLevel.get(levelIndex) ?? []
+    list.push(seg)
+    byLevel.set(levelIndex, list)
+  }
 
+  const usedSegs = tagged.map((t) => t.seg)
+  let levelIndices = [...byLevel.keys()].sort((a, b) => a - b)
+  if (levelIndices.length === 0) {
+    levelIndices = [0]
+    byLevel.set(0, [])
+  }
+
+  const nodes: Record<string, unknown> = {}
   const siteId = nid('site')
   const buildingId = nid('building')
-  const levelId = nid('level')
+  const levelNodeIds: string[] = []
 
-  for (const s of used) {
-    const [sx, sy] = transformPoint(s.x0, s.y0, ox, oy, scale, opts.offset)
-    const [ex, ey] = transformPoint(s.x1, s.y1, ox, oy, scale, opts.offset)
-    const wid = nid('wall')
-    wallIds.push(wid)
-    nodes[wid] = {
+  for (const li of levelIndices) {
+    const levelId = nid('level')
+    levelNodeIds.push(levelId)
+    const segs = byLevel.get(li) ?? []
+    const wallIds: string[] = []
+    for (const s of segs) {
+      const [sx, sy] = transformPoint(s.x0, s.y0, ox, oy, scale, opts.offset)
+      const [ex, ey] = transformPoint(s.x1, s.y1, ox, oy, scale, opts.offset)
+      const wid = nid('wall')
+      wallIds.push(wid)
+      nodes[wid] = {
+        object: 'node',
+        id: wid,
+        type: 'wall',
+        name: s.layer ? `Wall (${s.layer})` : undefined,
+        parentId: levelId,
+        visible: true,
+        metadata: { source: 'dxf-import', layer: s.layer, levelIndex: li },
+        children: [],
+        start: [sx, sy],
+        end: [ex, ey],
+        thickness: opts.wallThickness,
+        height: opts.wallHeight,
+        frontSide: 'unknown',
+        backSide: 'unknown',
+      }
+    }
+    nodes[levelId] = {
       object: 'node',
-      id: wid,
-      type: 'wall',
-      name: s.layer ? `Wall (${s.layer})` : undefined,
-      parentId: levelId,
+      id: levelId,
+      type: 'level',
+      parentId: buildingId,
       visible: true,
-      metadata: { source: 'dxf-import', layer: s.layer },
-      children: [],
-      start: [sx, sy],
-      end: [ex, ey],
-      thickness: opts.wallThickness,
-      height: opts.wallHeight,
-      frontSide: 'unknown',
-      backSide: 'unknown',
+      metadata: {
+        dxfLayerFloor: opts.layerFloorOneBased ? li + 1 : li,
+      },
+      children: wallIds,
+      level: li,
     }
   }
 
-  const bb = bboxFromSegments(used, ox, oy, scale, opts.offset)
+  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset)
   const margin = 2
   const polygon =
     bb === null
@@ -206,18 +300,31 @@ function buildSceneGraph(
           ],
         }
 
+  const siteMeta: Record<string, unknown> = {
+    source: 'dxf-import',
+    insUnits: header.insUnits,
+    scaleToMeters: scale,
+    offset: opts.offset,
+  }
+  if (opts.layerRegexSource) {
+    siteMeta.layerRegex = opts.layerRegexSource
+    siteMeta.layerFloorOneBased = opts.layerFloorOneBased
+    siteMeta.unmatchedLayers = opts.unmatchedLayers
+  }
+  if (opts.maxSegmentLengthM > 0) {
+    siteMeta.maxSegmentLengthM = opts.maxSegmentLengthM
+  }
+  if (skippedLong > 0) {
+    siteMeta.skippedSegmentsLongerThanM = skippedLong
+  }
+
   nodes[siteId] = {
     object: 'node',
     id: siteId,
     type: 'site',
     parentId: null,
     visible: true,
-    metadata: {
-      source: 'dxf-import',
-      insUnits: header.insUnits,
-      scaleToMeters: scale,
-      offset: opts.offset,
-    },
+    metadata: siteMeta,
     polygon,
     children: [buildingId],
   }
@@ -229,20 +336,15 @@ function buildSceneGraph(
     parentId: siteId,
     visible: true,
     metadata: {},
-    children: [levelId],
+    children: levelNodeIds,
     position: [0, 0, 0],
     rotation: [0, 0, 0],
   }
 
-  nodes[levelId] = {
-    object: 'node',
-    id: levelId,
-    type: 'level',
-    parentId: buildingId,
-    visible: true,
-    metadata: {},
-    children: wallIds,
-    level: 0,
+  if (skippedLong > 0 && opts.maxSegmentLengthM > 0) {
+    console.error(
+      `Skipped ${skippedLong} segment(s) longer than ${opts.maxSegmentLengthM} m (often site bounds or reference lines).`,
+    )
   }
 
   return { nodes, rootNodeIds: [siteId] }
@@ -274,12 +376,19 @@ async function main() {
     wallThickness: args.wallThickness,
     offset: args.offset,
     scaleOverride: args.scaleOverride,
+    layerRegexSource: args.layerRegexSource,
+    layerFloorOneBased: args.layerFloorOneBased,
+    unmatchedLayers: args.unmatchedLayers,
+    maxSegmentLengthM: args.maxSegmentLengthM,
   })
 
   const wallCount = Object.keys(scene.nodes).filter(
     (id) => (scene.nodes[id] as { type?: string }).type === 'wall',
   ).length
-  console.error(`Walls written: ${wallCount}`)
+  const levelCount = Object.keys(scene.nodes).filter(
+    (id) => (scene.nodes[id] as { type?: string }).type === 'level',
+  ).length
+  console.error(`Levels: ${levelCount}, walls: ${wallCount}`)
 
   const outPath = resolve(args.out)
   await mkdir(dirname(outPath), { recursive: true })

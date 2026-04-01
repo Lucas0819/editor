@@ -32,6 +32,15 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--wall-thickness` | 墙厚（米），默认 `0.15` |
 | `--no-offset` | 不使用 `$EXTMIN` 平移原点（默认会平移，减小坐标数值） |
 | `--scale-to-meters` | 手动指定「图纸单位 → 米」的乘数（覆盖 HEADER 里 `$INSUNITS` 的换算） |
+| `--layer-regex` | 按**图层名**拆成多个 `Level`。下一参数为正则字符串，**第一个捕获组**为楼层数字；若省略参数则默认 `图层\s*(\d+)`（匹配「图层 1」…「图层 7」） |
+| `--layer-floor-zero-based` | 与 `--layer-regex` 连用：捕获组表示 **0 起算的 level 序号**（默认是 **1 起算楼层**：`1`→`level` 字段 `0`） |
+| `--unmatched-layers` | `skip`（默认）：不匹配图层的线段丢弃；`level0`：归入第 0 层 |
+
+不传 `--layer-regex` 时仍为**单层**（所有墙在同一 `Level`）。
+
+### 可选：按长度过滤线段
+
+若需去掉场地边界等超长边线，可**显式**传入 `--max-segment-length-m <米>`（例如 `60`）。**默认不启用**（等价于不限制长度）。
 
 ## 单位与坐标
 
