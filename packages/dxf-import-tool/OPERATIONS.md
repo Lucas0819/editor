@@ -36,6 +36,10 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--layer-floor-zero-based` | 与 `--layer-regex` 连用：捕获组表示 **0 起算的 level 序号**（默认是 **1 起算楼层**：`1`→`level` 字段 `0`） |
 | `--unmatched-layers` | `skip`（默认）：不匹配图层的线段丢弃；`level0`：归入第 0 层 |
 | `--axis-snap-tolerance-m` | 在**米制**下：纵向偏差小于容差则视为水平并拉直；横向同理视为垂直。默认 `0.0001`（0.1 mm）；传 `0` 关闭 |
+| `--flip-x` | 在米制坐标上对 **DXF X** 取反后再写入墙的 `start`/`end` 第一个分量（Pascal 世界 **X**）。**默认已启用**（不写参数也等价于翻转），与常见 CAD 顶视与编辑器透视下的左右关系一致 |
+| `--no-flip-x` | 关闭上述 X 翻转，与 DXF 原始 X 同号 |
+| `--flip-y` | 对 **DXF Y** 取反后再写入第二个分量（Pascal 世界 **Z**）。默认关闭 |
+| `--no-flip-y` | 显式关闭 Y 翻转（默认即为关闭，一般无需写） |
 
 不传 `--layer-regex` 时仍为**单层**（所有墙在同一 `Level`）。
 
@@ -47,6 +51,7 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 
 - 从 DXF **HEADER** 读取 `$INSUNITS`（例如 `4` = 毫米），再换算为米。
 - 默认对 XY **减去 `$EXTMIN`**，使场景落在原点附近。
+- DXF 平面 **(x, y)** 对应 Pascal 楼层平面 **(start[0], start[1])**，即世界 **X** 与 **Z**。默认 **`--flip-x` 生效**（对 DXF x 取反）；若与图纸不一致，可加 **`--no-flip-x`** 或按需加 **`--flip-y`**。Site 的 `metadata` 中会记录 `flipX` / `flipY`。
 
 ## 在编辑器里加载
 

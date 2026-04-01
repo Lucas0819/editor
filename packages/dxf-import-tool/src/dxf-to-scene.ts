@@ -56,6 +56,10 @@ function parseArgs(argv: string[]) {
    * Reduces wall/render glitches from tiny DXF float drift on axis-aligned edges. 0 = off.
    */
   let axisSnapToleranceM = 1e-4
+  /** Negate plan X after scale (Pascal world X). Default true — matches typical CAD vs viewer orientation. */
+  let flipX = true
+  /** Negate plan Y after scale (Pascal world Z). Default false. */
+  let flipY = false
 
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -105,6 +109,14 @@ function parseArgs(argv: string[]) {
       if (!Number.isFinite(axisSnapToleranceM) || axisSnapToleranceM < 0) {
         axisSnapToleranceM = 0
       }
+    } else if (a === '--flip-x') {
+      flipX = true
+    } else if (a === '--no-flip-x') {
+      flipX = false
+    } else if (a === '--flip-y') {
+      flipY = true
+    } else if (a === '--no-flip-y') {
+      flipY = false
     }
   }
 
@@ -122,6 +134,8 @@ function parseArgs(argv: string[]) {
     unmatchedLayers,
     maxSegmentLengthM,
     axisSnapToleranceM,
+    flipX,
+    flipY,
   }
 }
 
@@ -132,10 +146,16 @@ function transformPoint(
   oy: number,
   scale: number,
   useOffset: boolean,
+  flipX: boolean,
+  flipY: boolean,
 ): [number, number] {
   const px = useOffset ? x - ox : x
   const py = useOffset ? y - oy : y
-  return [px * scale, py * scale]
+  let mx = px * scale
+  let my = py * scale
+  if (flipX) mx = -mx
+  if (flipY) my = -my
+  return [mx, my]
 }
 
 function segmentLengthM(
@@ -144,9 +164,11 @@ function segmentLengthM(
   oy: number,
   scale: number,
   useOffset: boolean,
+  flipX: boolean,
+  flipY: boolean,
 ): number {
-  const [x0, y0] = transformPoint(s.x0, s.y0, ox, oy, scale, useOffset)
-  const [x1, y1] = transformPoint(s.x1, s.y1, ox, oy, scale, useOffset)
+  const [x0, y0] = transformPoint(s.x0, s.y0, ox, oy, scale, useOffset, flipX, flipY)
+  const [x1, y1] = transformPoint(s.x1, s.y1, ox, oy, scale, useOffset, flipX, flipY)
   const dx = x1 - x0
   const dy = y1 - y0
   return Math.hypot(dx, dy)
@@ -158,6 +180,8 @@ function bboxFromSegments(
   oy: number,
   scale: number,
   useOffset: boolean,
+  flipX: boolean,
+  flipY: boolean,
 ): { minX: number; maxX: number; minY: number; maxY: number } | null {
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
@@ -165,8 +189,8 @@ function bboxFromSegments(
   let maxY = Number.NEGATIVE_INFINITY
   for (const s of segments) {
     for (const [x, y] of [
-      transformPoint(s.x0, s.y0, ox, oy, scale, useOffset),
-      transformPoint(s.x1, s.y1, ox, oy, scale, useOffset),
+      transformPoint(s.x0, s.y0, ox, oy, scale, useOffset, flipX, flipY),
+      transformPoint(s.x1, s.y1, ox, oy, scale, useOffset, flipX, flipY),
     ]) {
       minX = Math.min(minX, x)
       maxX = Math.max(maxX, x)
@@ -195,6 +219,8 @@ function buildSceneGraph(
     unmatchedLayers: UnmatchedLayersMode
     maxSegmentLengthM: number
     axisSnapToleranceM: number
+    flipX: boolean
+    flipY: boolean
   },
 ): SceneGraph {
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
@@ -210,7 +236,7 @@ function buildSceneGraph(
     if (tagged.length >= opts.maxWalls) {
       break
     }
-    const lenM = segmentLengthM(s, ox, oy, scale, opts.offset)
+    const lenM = segmentLengthM(s, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
     if (lenM < opts.minLenM) {
       continue
     }
@@ -258,8 +284,26 @@ function buildSceneGraph(
     const segs = byLevel.get(li) ?? []
     const wallIds: string[] = []
     for (const s of segs) {
-      const [sx, sy] = transformPoint(s.x0, s.y0, ox, oy, scale, opts.offset)
-      const [ex, ey] = transformPoint(s.x1, s.y1, ox, oy, scale, opts.offset)
+      const [sx, sy] = transformPoint(
+        s.x0,
+        s.y0,
+        ox,
+        oy,
+        scale,
+        opts.offset,
+        opts.flipX,
+        opts.flipY,
+      )
+      const [ex, ey] = transformPoint(
+        s.x1,
+        s.y1,
+        ox,
+        oy,
+        scale,
+        opts.offset,
+        opts.flipX,
+        opts.flipY,
+      )
       const wid = nid('wall')
       wallIds.push(wid)
       nodes[wid] = {
@@ -293,7 +337,7 @@ function buildSceneGraph(
     }
   }
 
-  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset)
+  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
   const margin = 2
   const polygon =
     bb === null
@@ -321,6 +365,8 @@ function buildSceneGraph(
     insUnits: header.insUnits,
     scaleToMeters: scale,
     offset: opts.offset,
+    flipX: opts.flipX,
+    flipY: opts.flipY,
   }
   if (opts.layerRegexSource) {
     siteMeta.layerRegex = opts.layerRegexSource
@@ -395,6 +441,9 @@ async function main() {
   console.error(
     `INSUNITS=${header.insUnits} → scale ${scale} m/unit, EXTMIN (${header.extMin.x}, ${header.extMin.y})`,
   )
+  console.error(
+    `Plan flip: flipX=${args.flipX}, flipY=${args.flipY} (default matches --flip-x; use --no-flip-x to disable)`,
+  )
   console.error(`Segments (LINE+LWPOLYLINE edges): ${segments.length}`)
   if (args.axisSnapToleranceM > 0) {
     console.error(`Axis snap (m): ${args.axisSnapToleranceM} — nearly horizontal/vertical edges aligned to axes`)
@@ -412,6 +461,8 @@ async function main() {
     unmatchedLayers: args.unmatchedLayers,
     maxSegmentLengthM: args.maxSegmentLengthM,
     axisSnapToleranceM: args.axisSnapToleranceM,
+    flipX: args.flipX,
+    flipY: args.flipY,
   })
 
   const wallCount = Object.keys(scene.nodes).filter(
