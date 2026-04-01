@@ -1,0 +1,8 @@
+{
+  "name": "@pascal-app/dxf-import-tool",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dxf-to-scene": "bun run src/dxf-to-scene.ts"
+  }
+}

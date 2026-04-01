@@ -39,6 +39,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Local CAD drawings (development only)
+*.dxf
+
 # Misc
 .DS_Store
 *.pem
