@@ -429,3 +429,347 @@ export function mergeDoubleWallLineSegments(
 
   return { merged: out, sourceSegmentsMerged, wallsReduced }
 }
+
+/** 水平/竖直墙段与轴线夹角小于此值时视为与轴平行（弧度） */
+const COLINEAR_AXIS_ALIGN_RAD = (2.5 * Math.PI) / 180
+/** 两段共线墙在轴向上的端点间隙 ≤ 此值（米）时合并（双线合并后门洞两侧常留 ~0.4–0.7m 缝；过大则会把整层同标高墙串成一条） */
+const COLINEAR_GAP_MERGE_MAX_M = 0.75
+/** 两段墙平行于同一轴线时，法向偏移 ≤ 此值（米）才视为同一立面 */
+const COLINEAR_GAP_MERGE_PERP_TOL_M = 0.06
+
+/**
+ * 双线合并后，同一楼层上「共线且端点之间有小间隙」的墙段再合并为一条中心线，
+ * 使门窗 INSERT 能沿整段立面得到正确的 localX，避免都挤在短碎片上被挤出墙外或重叠。
+ */
+export function mergeColinearGapWallPieces(
+  pieces: MergedWallSegment[],
+  opts: {
+    ox: number
+    oy: number
+    scale: number
+    offset: boolean
+    flipX: boolean
+    flipY: boolean
+  },
+): { merged: MergedWallSegment[]; piecesReduced: number } {
+  const isHorizontal = (s: PlanSegment): boolean | null => {
+    const [sx, sy] = transformPoint(s.x0, s.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [ex, ey] = transformPoint(s.x1, s.y1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const dx = ex - sx
+    const dy = ey - sy
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) {
+      return null
+    }
+    return Math.abs(dy) / len <= Math.sin(COLINEAR_AXIS_ALIGN_RAD)
+  }
+
+  const isVertical = (s: PlanSegment): boolean | null => {
+    const [sx, sy] = transformPoint(s.x0, s.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [ex, ey] = transformPoint(s.x1, s.y1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const dx = ex - sx
+    const dy = ey - sy
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) {
+      return null
+    }
+    return Math.abs(dx) / len <= Math.sin(COLINEAR_AXIS_ALIGN_RAD)
+  }
+
+  type Horiz = { w: MergedWallSegment; lo: number; hi: number; yMid: number }
+  type Vert = { w: MergedWallSegment; lo: number; hi: number; xMid: number }
+
+  const horiz: Horiz[] = []
+  const vert: Vert[] = []
+  const rest: MergedWallSegment[] = []
+
+  for (const w of pieces) {
+    if (w.mapping.target.kind === 'wall' && w.mapping.target.variant === 'column_outline') {
+      rest.push(w)
+      continue
+    }
+    const [sx, sy] = transformPoint(w.seg.x0, w.seg.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [ex, ey] = transformPoint(w.seg.x1, w.seg.y1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const dx = ex - sx
+    const dy = ey - sy
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) {
+      rest.push(w)
+      continue
+    }
+    const h = isHorizontal(w.seg)
+    const v = isVertical(w.seg)
+    if (h === true) {
+      horiz.push({
+        w,
+        lo: Math.min(sx, ex),
+        hi: Math.max(sx, ex),
+        yMid: (sy + ey) / 2,
+      })
+    } else if (v === true) {
+      vert.push({
+        w,
+        lo: Math.min(sy, ey),
+        hi: Math.max(sy, ey),
+        xMid: (sx + ex) / 2,
+      })
+    } else {
+      rest.push(w)
+    }
+  }
+
+  const sameLayer = (a: MergedWallSegment, b: MergedWallSegment): boolean =>
+    canonicalDxfLayerName(a.seg.layer) === canonicalDxfLayerName(b.seg.layer)
+
+  const mergeHorizPair = (a: Horiz, b: Horiz): Horiz => {
+    const lo = Math.min(a.lo, b.lo)
+    const hi = Math.max(a.hi, b.hi)
+    const yMid = (a.yMid + b.yMid) / 2
+    const [x0, y0] = inverseTransformPoint(lo, yMid, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [x1, y1] = inverseTransformPoint(hi, yMid, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const seg: PlanSegment = { x0, y0, x1, y1, layer: a.w.seg.layer }
+    const merged: MergedWallSegment = {
+      seg,
+      levelIndex: a.w.levelIndex,
+      mapping: a.w.mapping,
+      thicknessM: Math.max(a.w.thicknessM, b.w.thicknessM),
+      fromDoubleLineMerge: a.w.fromDoubleLineMerge || b.w.fromDoubleLineMerge,
+    }
+    return { w: merged, lo, hi, yMid }
+  }
+
+  const mergeVertPair = (a: Vert, b: Vert): Vert => {
+    const lo = Math.min(a.lo, b.lo)
+    const hi = Math.max(a.hi, b.hi)
+    const xMid = (a.xMid + b.xMid) / 2
+    const [x0, y0] = inverseTransformPoint(xMid, lo, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [x1, y1] = inverseTransformPoint(xMid, hi, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const seg: PlanSegment = { x0, y0, x1, y1, layer: a.w.seg.layer }
+    const merged: MergedWallSegment = {
+      seg,
+      levelIndex: a.w.levelIndex,
+      mapping: a.w.mapping,
+      thicknessM: Math.max(a.w.thicknessM, b.w.thicknessM),
+      fromDoubleLineMerge: a.w.fromDoubleLineMerge || b.w.fromDoubleLineMerge,
+    }
+    return { w: merged, lo, hi, xMid }
+  }
+
+  const canMergeHoriz = (a: Horiz, b: Horiz): boolean => {
+    if (a.w.levelIndex !== b.w.levelIndex || !sameLayer(a.w, b.w)) {
+      return false
+    }
+    if (Math.abs(a.yMid - b.yMid) > COLINEAR_GAP_MERGE_PERP_TOL_M) {
+      return false
+    }
+    const gap = Math.max(0, Math.max(a.lo, b.lo) - Math.min(a.hi, b.hi))
+    const overlap = Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)
+    if (overlap > 1e-9) {
+      return true
+    }
+    return gap <= COLINEAR_GAP_MERGE_MAX_M + 1e-9
+  }
+
+  const canMergeVert = (a: Vert, b: Vert): boolean => {
+    if (a.w.levelIndex !== b.w.levelIndex || !sameLayer(a.w, b.w)) {
+      return false
+    }
+    if (Math.abs(a.xMid - b.xMid) > COLINEAR_GAP_MERGE_PERP_TOL_M) {
+      return false
+    }
+    const gap = Math.max(0, Math.max(a.lo, b.lo) - Math.min(a.hi, b.hi))
+    const overlap = Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)
+    if (overlap > 1e-9) {
+      return true
+    }
+    return gap <= COLINEAR_GAP_MERGE_MAX_M + 1e-9
+  }
+
+  let piecesReduced = 0
+
+  /** 仅同标高、同图层的水平段才能链式合并；全局按 x 排序会被其它楼层的水平段打断 */
+  const yBucket = (y: number) => Math.round(y / 0.01) * 0.01
+  const horizGroups = new Map<string, Horiz[]>()
+  for (const h of horiz) {
+    const key = `${h.w.levelIndex}::${canonicalDxfLayerName(h.w.seg.layer)}::${yBucket(h.yMid)}`
+    const list = horizGroups.get(key) ?? []
+    list.push(h)
+    horizGroups.set(key, list)
+  }
+  const mergedHoriz: Horiz[] = []
+  for (const group of horizGroups.values()) {
+    group.sort((a, b) => a.lo - b.lo)
+    let i = 0
+    while (i < group.length) {
+      let cur = group[i]!
+      let j = i + 1
+      while (j < group.length) {
+        const next = group[j]!
+        if (canMergeHoriz(cur, next)) {
+          piecesReduced += 1
+          cur = mergeHorizPair(cur, next)
+          j++
+        } else {
+          break
+        }
+      }
+      mergedHoriz.push(cur)
+      i = j
+    }
+  }
+
+  const xBucket = (x: number) => Math.round(x / 0.01) * 0.01
+  const vertGroups = new Map<string, Vert[]>()
+  for (const v of vert) {
+    const key = `${v.w.levelIndex}::${canonicalDxfLayerName(v.w.seg.layer)}::${xBucket(v.xMid)}`
+    const list = vertGroups.get(key) ?? []
+    list.push(v)
+    vertGroups.set(key, list)
+  }
+  const mergedVert: Vert[] = []
+  for (const group of vertGroups.values()) {
+    group.sort((a, b) => a.lo - b.lo)
+    let i = 0
+    while (i < group.length) {
+      let cur = group[i]!
+      let j = i + 1
+      while (j < group.length) {
+        const next = group[j]!
+        if (canMergeVert(cur, next)) {
+          piecesReduced += 1
+          cur = mergeVertPair(cur, next)
+          j++
+        } else {
+          break
+        }
+      }
+      mergedVert.push(cur)
+      i = j
+    }
+  }
+
+  const merged: MergedWallSegment[] = [
+    ...rest,
+    ...mergedHoriz.map((h) => h.w),
+    ...mergedVert.map((v) => v.w),
+  ]
+  return { merged, piecesReduced }
+}
+
+/** 双线合并 + 共线缝合并后，墙角处常剩极短肢（≈0.2–0.35m）与长立面近乎垂直，3D 上为重复体块 */
+const REDUNDANT_STUB_MAX_LEN_M = 0.4
+const REDUNDANT_STUB_LONG_MIN_LEN_M = 2.0
+/** 短肢与长墙方向点积 |cos| 小于此视为近乎垂直 */
+const REDUNDANT_STUB_PERP_DOT_MAX = 0.38
+/** 短肢端点到长墙有限段的最近距离上限（米） */
+const REDUNDANT_STUB_TO_LONG_MAX_M = 0.18
+
+function distPointToFiniteSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax
+  const dy = by - ay
+  const len2 = dx * dx + dy * dy
+  if (len2 < 1e-18) {
+    return Math.hypot(px - ax, py - ay)
+  }
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2))
+  const qx = ax + t * dx
+  const qy = ay + t * dy
+  return Math.hypot(px - qx, py - qy)
+}
+
+/**
+ * 删除贴靠在一条同图层长墙中心线上的极短墙角肢（合并立面后多为重复网格）。
+ */
+export function removeRedundantCornerStubs(
+  pieces: MergedWallSegment[],
+  opts: {
+    ox: number
+    oy: number
+    scale: number
+    offset: boolean
+    flipX: boolean
+    flipY: boolean
+  },
+): { merged: MergedWallSegment[]; stubsRemoved: number } {
+  type Sc = {
+    sx: number
+    sy: number
+    ex: number
+    ey: number
+    len: number
+    ux: number
+    uy: number
+  }
+
+  const items: { w: MergedWallSegment; sc: Sc }[] = pieces.map((w) => {
+    const [sx, sy] = transformPoint(w.seg.x0, w.seg.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [ex, ey] = transformPoint(w.seg.x1, w.seg.y1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const dx = ex - sx
+    const dy = ey - sy
+    const len = Math.hypot(dx, dy)
+    const ux = len > 1e-12 ? dx / len : 1
+    const uy = len > 1e-12 ? dy / len : 0
+    return { w, sc: { sx, sy, ex, ey, len, ux, uy } }
+  })
+
+  const longIdx: number[] = []
+  for (let i = 0; i < items.length; i++) {
+    const { w, sc } = items[i]!
+    if (w.mapping.target.kind === 'wall' && w.mapping.target.variant === 'column_outline') {
+      continue
+    }
+    if (sc.len >= REDUNDANT_STUB_LONG_MIN_LEN_M) {
+      longIdx.push(i)
+    }
+  }
+
+  const remove = new Set<number>()
+  for (let i = 0; i < items.length; i++) {
+    if (remove.has(i)) {
+      continue
+    }
+    const { w, sc } = items[i]!
+    if (w.mapping.target.kind === 'wall' && w.mapping.target.variant === 'column_outline') {
+      continue
+    }
+    if (sc.len > REDUNDANT_STUB_MAX_LEN_M) {
+      continue
+    }
+
+    for (const j of longIdx) {
+      if (i === j || remove.has(j)) {
+        continue
+      }
+      const long = items[j]!
+      if (long.w.levelIndex !== w.levelIndex) {
+        continue
+      }
+      if (canonicalDxfLayerName(long.w.seg.layer) !== canonicalDxfLayerName(w.seg.layer)) {
+        continue
+      }
+
+      /** sc.ux/uy 已为切向单位向量；与长墙近乎垂直时 |cos| 小 */
+      const cosAlign = Math.abs(sc.ux * long.sc.ux + sc.uy * long.sc.uy)
+      if (cosAlign > REDUNDANT_STUB_PERP_DOT_MAX) {
+        continue
+      }
+
+      const d0 = distPointToFiniteSegment(sc.sx, sc.sy, long.sc.sx, long.sc.sy, long.sc.ex, long.sc.ey)
+      const d1 = distPointToFiniteSegment(sc.ex, sc.ey, long.sc.sx, long.sc.sy, long.sc.ex, long.sc.ey)
+      if (Math.min(d0, d1) <= REDUNDANT_STUB_TO_LONG_MAX_M) {
+        remove.add(i)
+        break
+      }
+    }
+  }
+
+  const merged = items.filter((_, i) => !remove.has(i)).map((x) => x.w)
+  return { merged, stubsRemoved: remove.size }
+}

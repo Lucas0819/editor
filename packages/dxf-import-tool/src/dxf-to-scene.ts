@@ -23,6 +23,7 @@ import { snapPlanSegmentsToAxis } from './axis-snap.ts'
 import {
   insUnitsToMetersFactor,
   insertBlockToColumnOutlineSegments,
+  type PlanInsert,
   type PlanSegment,
   parseDxfPlanSegments,
 } from './parse-dxf-entities.ts'
@@ -32,8 +33,28 @@ import {
   type DxfLayerMapping,
   type ParsedDxfLayerMappingFile,
 } from './dxf-layer-mapping.ts'
-import { baseDxfMetadata, displayNameForNode } from './dxf-scene-nodes.ts'
-import { mergeDoubleWallLineSegments } from './merge-double-wall-lines.ts'
+import {
+  canonicalBlockName,
+  DXF_IMPORT_DOOR_CENTER_Y,
+  DXF_IMPORT_DOOR_HEIGHT,
+  DXF_IMPORT_WINDOW_CENTER_Y,
+  DXF_IMPORT_WINDOW_HEIGHT,
+  groupAttachByWallIndex,
+  matchOpeningsToWalls,
+  type OpeningAttach,
+  type OpeningSynthetic,
+} from './dxf-openings.ts'
+import {
+  baseDxfMetadata,
+  displayNameForNode,
+  DXF_IMPORT_DOOR_DEFAULTS,
+  DXF_IMPORT_WINDOW_DEFAULTS,
+} from './dxf-scene-nodes.ts'
+import {
+  mergeColinearGapWallPieces,
+  mergeDoubleWallLineSegments,
+  removeRedundantCornerStubs,
+} from './merge-double-wall-lines.ts'
 
 type SceneGraph = {
   nodes: Record<string, unknown>
@@ -276,6 +297,8 @@ function buildSceneGraph(
     doubleWallMaxSpacingM: number
     doubleWallMinOverlapM: number
     doubleWallMinLengthRatio: number
+    /** 门窗 INSERT（WIN2D / DorLib 等）；与墙段关联后写入墙 children，否则生成短墙 */
+    inserts: PlanInsert[]
   },
 ): SceneGraph {
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
@@ -353,6 +376,33 @@ function buildSceneGraph(
       thicknessM: opts.wallThickness,
       fromDoubleLineMerge: false,
     }))
+  }
+
+  let colinearGapPiecesReduced = 0
+  let redundantCornerStubsRemoved = 0
+  {
+    const col = mergeColinearGapWallPieces(wallPieces, {
+      ox,
+      oy,
+      scale,
+      offset: opts.offset,
+      flipX: opts.flipX,
+      flipY: opts.flipY,
+    })
+    colinearGapPiecesReduced = col.piecesReduced
+    wallPieces = col.merged
+  }
+  {
+    const stub = removeRedundantCornerStubs(wallPieces, {
+      ox,
+      oy,
+      scale,
+      offset: opts.offset,
+      flipX: opts.flipX,
+      flipY: opts.flipY,
+    })
+    redundantCornerStubsRemoved = stub.stubsRemoved
+    wallPieces = stub.merged
   }
 
   /** 承重柱（column_outline）：平面边长即柱宽方向尺寸，墙厚与边长一致时更接近正方形柱体 */
@@ -443,6 +493,49 @@ function buildSceneGraph(
     siteMeta.mergeDoubleWallSourceSegments = mergeStats.sourceSegmentsMerged
     siteMeta.mergeDoubleWallReduced = mergeStats.wallsReduced
   }
+  if (colinearGapPiecesReduced > 0) {
+    siteMeta.mergeColinearGapReduced = colinearGapPiecesReduced
+  }
+  if (redundantCornerStubsRemoved > 0) {
+    siteMeta.redundantCornerStubsRemoved = redundantCornerStubsRemoved
+  }
+
+  const flatWallPieces: WallPiece[] = []
+  for (const li of levelIndices) {
+    flatWallPieces.push(...(byLevel.get(li) ?? []))
+  }
+
+  const openingResolved =
+    opts.inserts.length > 0
+      ? matchOpeningsToWalls(opts.inserts, flatWallPieces, {
+          ox,
+          oy,
+          scale,
+          offset: opts.offset,
+          flipX: opts.flipX,
+          flipY: opts.flipY,
+          layerMapping: opts.layerMapping,
+          unitToMeters: scale,
+          defaultWallThicknessM: opts.wallThickness,
+        })
+      : []
+
+  if (openingResolved.length > 0) {
+    siteMeta.dxfOpeningResolved = openingResolved.length
+    siteMeta.dxfOpeningAttach = openingResolved.filter((r) => r.mode === 'attach').length
+    siteMeta.dxfOpeningSyntheticWalls = openingResolved.filter((r) => r.mode === 'synthetic').length
+  }
+
+  const attachList = openingResolved.filter((r): r is OpeningAttach => r.mode === 'attach')
+  const attachByWall = groupAttachByWallIndex(attachList)
+  const syntheticByLevel = new Map<number, OpeningSynthetic[]>()
+  for (const r of openingResolved) {
+    if (r.mode === 'synthetic') {
+      const list = syntheticByLevel.get(r.levelIndex) ?? []
+      list.push(r)
+      syntheticByLevel.set(r.levelIndex, list)
+    }
+  }
 
   nodes[siteId] = {
     object: 'node',
@@ -469,6 +562,7 @@ function buildSceneGraph(
     rotation: [0, 0, 0],
   }
 
+  let flatWallIndex = 0
   for (const li of levelIndices) {
     const levelId = nid('level')
     levelNodeIds.push(levelId)
@@ -499,6 +593,58 @@ function buildSceneGraph(
       const wid = nid('wall')
       wallIds.push(wid)
       const baseLabel = displayNameForNode(s.layer, mapping)
+      const childIds: string[] = []
+      for (const op of attachByWall.get(flatWallIndex) ?? []) {
+        const ins = op.insert
+        const mapIns = resolveLayerMapping(ins.layer, opts.layerMapping?.map ?? null)
+        const label = op.kind === 'window' ? '窗' : '门'
+        if (op.kind === 'window') {
+          const cid = nid('window')
+          childIds.push(cid)
+          nodes[cid] = {
+            object: 'node',
+            id: cid,
+            type: 'window',
+            name: `${label} ${nameSeq.next()}`,
+            parentId: wid,
+            visible: true,
+            metadata: {
+              ...baseDxfMetadata(ins.layer, li, mapIns),
+              dxfOpeningBlock: canonicalBlockName(ins.blockName),
+            },
+            position: [op.localX, DXF_IMPORT_WINDOW_CENTER_Y, 0],
+            rotation: [0, 0, 0],
+            side: 'front',
+            wallId: wid,
+            width: op.widthM,
+            height: DXF_IMPORT_WINDOW_HEIGHT,
+            ...DXF_IMPORT_WINDOW_DEFAULTS,
+          }
+        } else {
+          const cid = nid('door')
+          childIds.push(cid)
+          nodes[cid] = {
+            object: 'node',
+            id: cid,
+            type: 'door',
+            name: `${label} ${nameSeq.next()}`,
+            parentId: wid,
+            visible: true,
+            metadata: {
+              ...baseDxfMetadata(ins.layer, li, mapIns),
+              dxfOpeningBlock: canonicalBlockName(ins.blockName),
+            },
+            position: [op.localX, DXF_IMPORT_DOOR_CENTER_Y, 0],
+            rotation: [0, 0, 0],
+            side: 'front',
+            wallId: wid,
+            width: op.widthM,
+            height: DXF_IMPORT_DOOR_HEIGHT,
+            ...DXF_IMPORT_DOOR_DEFAULTS,
+          }
+        }
+      }
+      flatWallIndex += 1
       nodes[wid] = {
         object: 'node',
         id: wid,
@@ -510,10 +656,86 @@ function buildSceneGraph(
           ...baseDxfMetadata(s.layer, li, mapping),
           ...(fromDoubleLineMerge ? { dxfMergedDoubleWall: true } : {}),
         },
-        children: [],
+        children: childIds,
         start: [sx, sy],
         end: [ex, ey],
         thickness: thicknessM,
+        height: opts.wallHeight,
+        frontSide: 'unknown',
+        backSide: 'unknown',
+      }
+    }
+    for (const syn of syntheticByLevel.get(li) ?? []) {
+      const [sx, sy] = syn.start
+      const [ex, ey] = syn.end
+      const wid = nid('wall')
+      wallIds.push(wid)
+      const baseLabel = displayNameForNode(syn.layer, syn.mapping)
+      const ins = syn.insert
+      const mapIns = resolveLayerMapping(ins.layer, opts.layerMapping?.map ?? null)
+      const label = syn.kind === 'window' ? '窗' : '门'
+      let cid: string
+      if (syn.kind === 'window') {
+        cid = nid('window')
+        nodes[cid] = {
+          object: 'node',
+          id: cid,
+          type: 'window',
+          name: `${label} ${nameSeq.next()}`,
+          parentId: wid,
+          visible: true,
+          metadata: {
+            ...baseDxfMetadata(ins.layer, li, mapIns),
+            dxfOpeningBlock: canonicalBlockName(ins.blockName),
+            dxfOpeningSyntheticWall: true,
+          },
+          position: [syn.widthM / 2, DXF_IMPORT_WINDOW_CENTER_Y, 0],
+          rotation: [0, 0, 0],
+          side: 'front',
+          wallId: wid,
+          width: syn.widthM,
+          height: DXF_IMPORT_WINDOW_HEIGHT,
+          ...DXF_IMPORT_WINDOW_DEFAULTS,
+        }
+      } else {
+        cid = nid('door')
+        nodes[cid] = {
+          object: 'node',
+          id: cid,
+          type: 'door',
+          name: `${label} ${nameSeq.next()}`,
+          parentId: wid,
+          visible: true,
+          metadata: {
+            ...baseDxfMetadata(ins.layer, li, mapIns),
+            dxfOpeningBlock: canonicalBlockName(ins.blockName),
+            dxfOpeningSyntheticWall: true,
+          },
+          position: [syn.widthM / 2, DXF_IMPORT_DOOR_CENTER_Y, 0],
+          rotation: [0, 0, 0],
+          side: 'front',
+          wallId: wid,
+          width: syn.widthM,
+          height: DXF_IMPORT_DOOR_HEIGHT,
+          ...DXF_IMPORT_DOOR_DEFAULTS,
+        }
+      }
+      nodes[wid] = {
+        object: 'node',
+        id: wid,
+        type: 'wall',
+        name: `${baseLabel} ${nameSeq.next()}`,
+        parentId: levelId,
+        visible: true,
+        metadata: {
+          ...baseDxfMetadata(syn.layer, li, syn.mapping),
+          dxfOpeningSyntheticWall: true,
+          ...(syn.fromDoubleLineMerge ? { dxfMergedDoubleWall: true } : {}),
+        },
+        children: [cid],
+        start: [sx, sy],
+        end: [ex, ey],
+        thickness: syn.thicknessM,
         height: opts.wallHeight,
         frontSide: 'unknown',
         backSide: 'unknown',
@@ -548,6 +770,11 @@ function buildSceneGraph(
     console.error(
       `Merged double wall lines: ${mergeStats.sourceSegmentsMerged} segment(s) → ${mergeStats.sourceSegmentsMerged - mergeStats.wallsReduced} wall(s) (−${mergeStats.wallsReduced})`,
     )
+  }
+  if (openingResolved.length > 0) {
+    const a = openingResolved.filter((r) => r.mode === 'attach').length
+    const s = openingResolved.filter((r) => r.mode === 'synthetic').length
+    console.error(`Openings resolved: ${openingResolved.length} (on-wall ${a}, synthetic short walls ${s})`)
   }
 
   return { nodes, rootNodeIds: [siteId] }
@@ -636,15 +863,22 @@ async function main() {
     doubleWallMaxSpacingM: args.doubleWallMaxSpacingM,
     doubleWallMinOverlapM: args.doubleWallMinOverlapM,
     doubleWallMinLengthRatio: args.doubleWallMinLengthRatio,
+    inserts,
   })
 
   const wallCount = Object.keys(scene.nodes).filter(
     (id) => (scene.nodes[id] as { type?: string }).type === 'wall',
   ).length
+  const windowCount = Object.keys(scene.nodes).filter(
+    (id) => (scene.nodes[id] as { type?: string }).type === 'window',
+  ).length
+  const doorCount = Object.keys(scene.nodes).filter(
+    (id) => (scene.nodes[id] as { type?: string }).type === 'door',
+  ).length
   const levelCount = Object.keys(scene.nodes).filter(
     (id) => (scene.nodes[id] as { type?: string }).type === 'level',
   ).length
-  console.error(`Levels: ${levelCount}, walls: ${wallCount}`)
+  console.error(`Levels: ${levelCount}, walls: ${wallCount}, windows: ${windowCount}, doors: ${doorCount}`)
 
   const outPath = resolve(args.out)
   await mkdir(dirname(outPath), { recursive: true })

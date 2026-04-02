@@ -102,7 +102,17 @@ location.reload()
 - 从 DXF **图层表**读取名称、常见 **工程前缀 / `$` 分隔 / 专业前缀** 的说明，以及与本工具 `--layer-regex` 的对应关系，见同目录 **[LAYERS.md](./LAYERS.md)**。
 - **图纸图层 ↔ Pascal 节点 / 物品 category** 的对应表与 **`mapDxfLayerToPascal()`**，见 [LAYERS.md](./LAYERS.md) 第 5 节与 `src/dxf-layer-mapping.ts`。
 
+## 门窗（INSERT 块）
+
+- 解析 **ENTITIES** 中的 **INSERT**（含天正等带 **ATTRIB** / **SEQEND** 的块参照），按块名识别：
+  - **窗**：`WIN2D`、`TCHSYS$WIN` 等；
+  - **门**：`DorLib`、`DOOR2D` 等。
+- 与 **墙线段**（同坐标变换与轴对齐）做关联：插入点投影到墙中心线、**宽度**取 `max(|41|,|42|)`×图纸单位→米（与 `$INSUNITS` 一致）。
+- **优先**落在已有墙段上：在父墙 `children` 中生成 `window` / `door`（墙局部坐标与 `example/墙体内有门和窗.json` 默认一致：窗高 1.5m、中心 1.5m；门高 2.1m、中心 1.05m）。
+- **若**无法贴墙（无墙或偏离过大）：用最近墙方向生成**短墙**再挂门/窗（`metadata.dxfOpeningSyntheticWall`）。
+- 柱块 **INSERT**（图层映射为 `column_outline`）仍只展开为柱轮廓，不参与门窗。
+
 ## 限制
 
-- 仅解析 **LINE / LWPOLYLINE**；块参照、复杂实体类型未处理。
-- 结果为「竖直墙条」可视化，不是完整 BIM（房间、门窗、屋顶等需另建管线）。
+- 仅解析 **LINE / LWPOLYLINE**；块参照中除柱轮廓与**上述门窗块**外，其它块未展开。
+- 结果为「竖直墙条 + 门窗洞口」可视化，不是完整 BIM（房间、屋顶等需另建管线）。

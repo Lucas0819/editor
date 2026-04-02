@@ -19,13 +19,16 @@ export type PlanSegment = {
   fromInsert?: boolean
 }
 
-/** ENTITIES 中 INSERT：插入点 + XY 比例（相对块定义，常见柱块为 ±0.5 正方形） */
+/** ENTITIES 中 INSERT：插入点 + XYZ 比例 + 转角（块名用于柱/门窗分流） */
 export type PlanInsert = {
   layer: string
+  /** 块名（可含 xref 前缀） */
+  blockName: string
   bx: number
   by: number
   sx: number
   sy: number
+  sz: number
   rotationDeg: number
 }
 
@@ -172,35 +175,75 @@ function parseInsertEntity(
 ): { insert: PlanInsert | null; next: number } {
   let i = start
   let layer = ''
+  let blockName = ''
   let bx = 0
   let by = 0
   let sx = 1
   let sy = 1
+  let sz = 1
   let rot = 0
   while (i < lines.length - 1) {
     const code = Number(lines[i])
     const val = lines[i + 1]
-    i += 2
     if (code === 0) {
+      const v = trimPair(val)
+      /** 循环从「0 / INSERT」起跳，首对即 code 0，否则会未读 10/20/50 就 return，rotation 恒为 0 */
+      if (v === 'INSERT') {
+        i += 2
+        continue
+      }
+      if (v === 'ATTRIB') {
+        i += 2
+        while (i < lines.length - 1 && Number(lines[i]) !== 0) {
+          i += 2
+        }
+        continue
+      }
+      if (v === 'SEQEND') {
+        i += 2
+        if (!Number.isFinite(sx) || sx === 0) {
+          sx = 1
+        }
+        if (!Number.isFinite(sy) || sy === 0) {
+          sy = 1
+        }
+        if (!Number.isFinite(sz) || sz === 0) {
+          sz = 1
+        }
+        if (!Number.isFinite(rot)) {
+          rot = 0
+        }
+        return {
+          insert: { layer, blockName, bx, by, sx, sy, sz, rotationDeg: rot },
+          next: i,
+        }
+      }
+      /** 无 ATTRIB 的 INSERT：下一实体（LINE/LWPOLYLINE/…）的 0 开头即结束 */
       if (!Number.isFinite(sx) || sx === 0) {
         sx = 1
       }
       if (!Number.isFinite(sy) || sy === 0) {
         sy = 1
       }
+      if (!Number.isFinite(sz) || sz === 0) {
+        sz = 1
+      }
       if (!Number.isFinite(rot)) {
         rot = 0
       }
       return {
-        insert: { layer, bx, by, sx, sy, rotationDeg: rot },
-        next: i - 2,
+        insert: { layer, blockName, bx, by, sx, sy, sz, rotationDeg: rot },
+        next: i,
       }
     }
+    i += 2
     if (code === 8) layer = trimPair(val)
+    if (code === 2) blockName = trimPair(val)
     if (code === 10) bx = Number.parseFloat(trimPair(val))
     if (code === 20) by = Number.parseFloat(trimPair(val))
     if (code === 41) sx = Number.parseFloat(trimPair(val))
     if (code === 42) sy = Number.parseFloat(trimPair(val))
+    if (code === 43) sz = Number.parseFloat(trimPair(val))
     if (code === 50) rot = Number.parseFloat(trimPair(val))
   }
   return { insert: null, next: start }
