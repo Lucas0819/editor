@@ -22,9 +22,18 @@ import {
 import { snapPlanSegmentsToAxis } from './axis-snap.ts'
 import {
   insUnitsToMetersFactor,
+  insertBlockToColumnOutlineSegments,
   type PlanSegment,
   parseDxfPlanSegments,
 } from './parse-dxf-entities.ts'
+import {
+  parseDxfLayerMappingFileJson,
+  resolveLayerMapping,
+  type DxfLayerMapping,
+  type ParsedDxfLayerMappingFile,
+} from './dxf-layer-mapping.ts'
+import { baseDxfMetadata, displayNameForNode } from './dxf-scene-nodes.ts'
+import { mergeDoubleWallLineSegments } from './merge-double-wall-lines.ts'
 
 type SceneGraph = {
   nodes: Record<string, unknown>
@@ -40,7 +49,7 @@ function parseArgs(argv: string[]) {
   let out = 'scene-from-dxf.json'
   let maxWalls = 8000
   let minLenM = 0.02
-  let wallHeight = 2.5
+  let wallHeight = 3
   let wallThickness = 0.15
   let offset = true
   let scaleOverride: number | null = null
@@ -60,6 +69,15 @@ function parseArgs(argv: string[]) {
   let flipX = true
   /** Negate plan Y after scale (Pascal world Z). Default false. */
   let flipY = false
+  /** Optional JSON: per-layer `target` + `confidence` overrides (see `parseDxfLayerMappingFileJson`). */
+  let mappingFile = ''
+  /** 将同层平行双线合并为中心线，厚度取两线间距（CAD 墙厚表达） */
+  let mergeDoubleWallLines = false
+  let doubleWallMinSpacingM = 0.02
+  let doubleWallMaxSpacingM = 0.65
+  let doubleWallMinOverlapM = 0.04
+  /** 双线合并：两段长度比下限；0=不限制（旧行为）。默认 0.75 避免长墙与短隔墙并成一组 */
+  let doubleWallMinLengthRatio = 0.75
 
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -117,6 +135,19 @@ function parseArgs(argv: string[]) {
       flipY = true
     } else if (a === '--no-flip-y') {
       flipY = false
+    } else if (a === '--mapping-file' || a === '-m') {
+      mappingFile = argv[++i] ?? ''
+    } else if (a === '--merge-double-wall-lines') {
+      mergeDoubleWallLines = true
+    } else if (a === '--double-wall-min-spacing-m') {
+      doubleWallMinSpacingM = Number.parseFloat(argv[++i] ?? '') || doubleWallMinSpacingM
+    } else if (a === '--double-wall-max-spacing-m') {
+      doubleWallMaxSpacingM = Number.parseFloat(argv[++i] ?? '') || doubleWallMaxSpacingM
+    } else if (a === '--double-wall-min-overlap-m') {
+      doubleWallMinOverlapM = Number.parseFloat(argv[++i] ?? '') || doubleWallMinOverlapM
+    } else if (a === '--double-wall-min-length-ratio') {
+      const v = Number.parseFloat(argv[++i] ?? '0')
+      doubleWallMinLengthRatio = Number.isFinite(v) && v >= 0 && v <= 1 ? v : doubleWallMinLengthRatio
     }
   }
 
@@ -136,6 +167,12 @@ function parseArgs(argv: string[]) {
     axisSnapToleranceM,
     flipX,
     flipY,
+    mappingFile,
+    mergeDoubleWallLines,
+    doubleWallMinSpacingM,
+    doubleWallMaxSpacingM,
+    doubleWallMinOverlapM,
+    doubleWallMinLengthRatio,
   }
 }
 
@@ -172,6 +209,17 @@ function segmentLengthM(
   const dx = x1 - x0
   const dy = y1 - y0
   return Math.hypot(dx, dy)
+}
+
+/** 导出节点 `name` 后缀：全局自增，便于在编辑器中按序号定位（1 起） */
+function createExportNameCounter(): { next: () => number } {
+  let n = 0
+  return {
+    next: () => {
+      n += 1
+      return n
+    },
+  }
 }
 
 function bboxFromSegments(
@@ -221,6 +269,13 @@ function buildSceneGraph(
     axisSnapToleranceM: number
     flipX: boolean
     flipY: boolean
+    /** 来自 `--mapping-file`；仅 `map` 参与解析，`layerCount` 写入 site metadata */
+    layerMapping: ParsedDxfLayerMappingFile | null
+    mergeDoubleWallLines: boolean
+    doubleWallMinSpacingM: number
+    doubleWallMaxSpacingM: number
+    doubleWallMinOverlapM: number
+    doubleWallMinLengthRatio: number
   },
 ): SceneGraph {
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
@@ -229,12 +284,19 @@ function buildSceneGraph(
 
   const layerRegex = opts.layerRegexSource ? compileLayerRegex(opts.layerRegexSource) : null
 
-  type Tagged = { seg: PlanSegment; levelIndex: number }
+  type Tagged = { seg: PlanSegment; levelIndex: number; mapping: DxfLayerMapping }
   const tagged: Tagged[] = []
   let skippedLong = 0
+  /** 非墙体类图层（含 skip/annotation/window/door/…）的线段条数，不计入墙 */
+  let skippedSemanticLayerSegments = 0
   for (const s of segments) {
     if (tagged.length >= opts.maxWalls) {
       break
+    }
+    const mapping = resolveLayerMapping(s.layer, opts.layerMapping?.map ?? null)
+    if (mapping.target.kind !== 'wall') {
+      skippedSemanticLayerSegments++
+      continue
     }
     const lenM = segmentLengthM(s, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
     if (lenM < opts.minLenM) {
@@ -256,85 +318,66 @@ function buildSceneGraph(
       }
       levelIndex = idx
     }
-    tagged.push({ seg: s, levelIndex })
+    tagged.push({ seg: s, levelIndex, mapping })
   }
 
-  const byLevel = new Map<number, PlanSegment[]>()
-  for (const { seg, levelIndex } of tagged) {
-    const list = byLevel.get(levelIndex) ?? []
-    list.push(seg)
-    byLevel.set(levelIndex, list)
+  type WallPiece = {
+    seg: PlanSegment
+    levelIndex: number
+    mapping: DxfLayerMapping
+    thicknessM: number
+    fromDoubleLineMerge: boolean
   }
 
-  const usedSegs = tagged.map((t) => t.seg)
+  let wallPieces: WallPiece[]
+  let mergeStats: { sourceSegmentsMerged: number; wallsReduced: number } | null = null
+  if (opts.mergeDoubleWallLines) {
+    const mr = mergeDoubleWallLineSegments(tagged, {
+      ox,
+      oy,
+      scale,
+      offset: opts.offset,
+      flipX: opts.flipX,
+      flipY: opts.flipY,
+      defaultThicknessM: opts.wallThickness,
+      minDoubleSpacingM: opts.doubleWallMinSpacingM,
+      maxDoubleSpacingM: opts.doubleWallMaxSpacingM,
+      minOverlapM: opts.doubleWallMinOverlapM,
+      minLengthRatio: opts.doubleWallMinLengthRatio,
+    })
+    wallPieces = mr.merged
+    mergeStats = { sourceSegmentsMerged: mr.sourceSegmentsMerged, wallsReduced: mr.wallsReduced }
+  } else {
+    wallPieces = tagged.map((t) => ({
+      ...t,
+      thicknessM: opts.wallThickness,
+      fromDoubleLineMerge: false,
+    }))
+  }
+
+  /** 承重柱（column_outline）：平面边长即柱宽方向尺寸，墙厚与边长一致时更接近正方形柱体 */
+  const columnOutlineThicknessCapM = 3
+  wallPieces = wallPieces.map((w) => {
+    if (w.mapping.target.kind !== 'wall' || w.mapping.target.variant !== 'column_outline') {
+      return w
+    }
+    const lenM = segmentLengthM(w.seg, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
+    const t = Math.min(Math.max(lenM, opts.wallThickness), columnOutlineThicknessCapM)
+    return { ...w, thicknessM: t }
+  })
+
+  const byLevel = new Map<number, WallPiece[]>()
+  for (const w of wallPieces) {
+    const list = byLevel.get(w.levelIndex) ?? []
+    list.push(w)
+    byLevel.set(w.levelIndex, list)
+  }
+
+  const usedSegs = wallPieces.map((w) => w.seg)
   let levelIndices = [...byLevel.keys()].sort((a, b) => a - b)
   if (levelIndices.length === 0) {
     levelIndices = [0]
     byLevel.set(0, [])
-  }
-
-  const nodes: Record<string, unknown> = {}
-  const siteId = nid('site')
-  const buildingId = nid('building')
-  const levelNodeIds: string[] = []
-
-  for (const li of levelIndices) {
-    const levelId = nid('level')
-    levelNodeIds.push(levelId)
-    const segs = byLevel.get(li) ?? []
-    const wallIds: string[] = []
-    for (const s of segs) {
-      const [sx, sy] = transformPoint(
-        s.x0,
-        s.y0,
-        ox,
-        oy,
-        scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
-      const [ex, ey] = transformPoint(
-        s.x1,
-        s.y1,
-        ox,
-        oy,
-        scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
-      const wid = nid('wall')
-      wallIds.push(wid)
-      nodes[wid] = {
-        object: 'node',
-        id: wid,
-        type: 'wall',
-        name: s.layer ? `Wall (${s.layer})` : undefined,
-        parentId: levelId,
-        visible: true,
-        metadata: { source: 'dxf-import', layer: s.layer, levelIndex: li },
-        children: [],
-        start: [sx, sy],
-        end: [ex, ey],
-        thickness: opts.wallThickness,
-        height: opts.wallHeight,
-        frontSide: 'unknown',
-        backSide: 'unknown',
-      }
-    }
-    nodes[levelId] = {
-      object: 'node',
-      id: levelId,
-      type: 'level',
-      parentId: buildingId,
-      visible: true,
-      metadata: {
-        dxfLayerFloor: opts.layerFloorOneBased ? li + 1 : li,
-      },
-      children: wallIds,
-      level: li,
-    }
   }
 
   const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
@@ -360,6 +403,13 @@ function buildSceneGraph(
           ],
         }
 
+  const nameSeq = createExportNameCounter()
+
+  const nodes: Record<string, unknown> = {}
+  const siteId = nid('site')
+  const buildingId = nid('building')
+  const levelNodeIds: string[] = []
+
   const siteMeta: Record<string, unknown> = {
     source: 'dxf-import',
     insUnits: header.insUnits,
@@ -367,6 +417,9 @@ function buildSceneGraph(
     offset: opts.offset,
     flipX: opts.flipX,
     flipY: opts.flipY,
+  }
+  if (opts.layerMapping && opts.layerMapping.layerCount > 0) {
+    siteMeta.layerMappingLayers = opts.layerMapping.layerCount
   }
   if (opts.layerRegexSource) {
     siteMeta.layerRegex = opts.layerRegexSource
@@ -382,6 +435,14 @@ function buildSceneGraph(
   if (skippedLong > 0) {
     siteMeta.skippedSegmentsLongerThanM = skippedLong
   }
+  if (skippedSemanticLayerSegments > 0) {
+    siteMeta.skippedSemanticLayerSegments = skippedSemanticLayerSegments
+  }
+  if (mergeStats && mergeStats.wallsReduced > 0) {
+    siteMeta.mergeDoubleWallLines = true
+    siteMeta.mergeDoubleWallSourceSegments = mergeStats.sourceSegmentsMerged
+    siteMeta.mergeDoubleWallReduced = mergeStats.wallsReduced
+  }
 
   nodes[siteId] = {
     object: 'node',
@@ -389,6 +450,7 @@ function buildSceneGraph(
     type: 'site',
     parentId: null,
     visible: true,
+    name: `场地 ${nameSeq.next()}`,
     metadata: siteMeta,
     polygon,
     children: [buildingId],
@@ -400,15 +462,91 @@ function buildSceneGraph(
     type: 'building',
     parentId: siteId,
     visible: true,
+    name: `建筑 ${nameSeq.next()}`,
     metadata: {},
     children: levelNodeIds,
     position: [0, 0, 0],
     rotation: [0, 0, 0],
   }
 
+  for (const li of levelIndices) {
+    const levelId = nid('level')
+    levelNodeIds.push(levelId)
+    const levelName = `楼层 ${nameSeq.next()}`
+    const segs = byLevel.get(li) ?? []
+    const wallIds: string[] = []
+    for (const { seg: s, mapping, thicknessM, fromDoubleLineMerge } of segs) {
+      const [sx, sy] = transformPoint(
+        s.x0,
+        s.y0,
+        ox,
+        oy,
+        scale,
+        opts.offset,
+        opts.flipX,
+        opts.flipY,
+      )
+      const [ex, ey] = transformPoint(
+        s.x1,
+        s.y1,
+        ox,
+        oy,
+        scale,
+        opts.offset,
+        opts.flipX,
+        opts.flipY,
+      )
+      const wid = nid('wall')
+      wallIds.push(wid)
+      const baseLabel = displayNameForNode(s.layer, mapping)
+      nodes[wid] = {
+        object: 'node',
+        id: wid,
+        type: 'wall',
+        name: `${baseLabel} ${nameSeq.next()}`,
+        parentId: levelId,
+        visible: true,
+        metadata: {
+          ...baseDxfMetadata(s.layer, li, mapping),
+          ...(fromDoubleLineMerge ? { dxfMergedDoubleWall: true } : {}),
+        },
+        children: [],
+        start: [sx, sy],
+        end: [ex, ey],
+        thickness: thicknessM,
+        height: opts.wallHeight,
+        frontSide: 'unknown',
+        backSide: 'unknown',
+      }
+    }
+    nodes[levelId] = {
+      object: 'node',
+      id: levelId,
+      type: 'level',
+      parentId: buildingId,
+      visible: true,
+      name: levelName,
+      metadata: {
+        dxfLayerFloor: opts.layerFloorOneBased ? li + 1 : li,
+      },
+      children: wallIds,
+      level: li,
+    }
+  }
+
   if (skippedLong > 0 && opts.maxSegmentLengthM > 0) {
     console.error(
       `Skipped ${skippedLong} segment(s) longer than ${opts.maxSegmentLengthM} m (often site bounds or reference lines).`,
+    )
+  }
+  if (skippedSemanticLayerSegments > 0) {
+    console.error(
+      `Skipped ${skippedSemanticLayerSegments} segment(s) on non-wall layers (walls-only output; see LAYERS.md / mapDxfLayerToPascal).`,
+    )
+  }
+  if (mergeStats && mergeStats.wallsReduced > 0) {
+    console.error(
+      `Merged double wall lines: ${mergeStats.sourceSegmentsMerged} segment(s) → ${mergeStats.sourceSegmentsMerged - mergeStats.wallsReduced} wall(s) (−${mergeStats.wallsReduced})`,
     )
   }
 
@@ -419,19 +557,48 @@ async function main() {
   const args = parseArgs(process.argv)
   if (!args.input) {
     console.error(
-      'Usage: bun run dxf-to-scene.ts --input path/to/file.dxf [--out scene.json] [--max-walls 8000]',
+      'Usage: bun run dxf-to-scene.ts --input path/to/file.dxf [--out scene.json] [--max-walls 8000] [--mapping-file layers.json]',
     )
     process.exit(1)
+  }
+
+  let layerMapping: ParsedDxfLayerMappingFile | null = null
+  if (args.mappingFile.trim()) {
+    const mp = resolve(args.mappingFile.trim())
+    console.error(`Reading layer mapping ${mp} …`)
+    const raw = await readFile(mp, 'utf8')
+    layerMapping = parseDxfLayerMappingFileJson(raw)
+    console.error(
+      `Layer mapping: ${layerMapping.layerCount} layer(s), ${layerMapping.map.size} lookup key(s)`,
+    )
   }
 
   const inputPath = resolve(args.input)
   console.error(`Reading ${inputPath} …`)
   const text = await readFile(inputPath, 'utf8')
   console.error('Parsing DXF …')
-  const { header, segments: rawSegments } = parseDxfPlanSegments(text)
+  const { header, segments: rawSegments, inserts } = parseDxfPlanSegments(text)
   const scale = args.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
+  const expanded: PlanSegment[] = [...rawSegments]
+  let columnInsertEdgeCount = 0
+  for (const ins of inserts) {
+    const map = resolveLayerMapping(ins.layer, layerMapping?.map ?? null)
+    if (map.target.kind === 'wall' && map.target.variant === 'column_outline') {
+      const segs = insertBlockToColumnOutlineSegments(ins)
+      expanded.push(...segs)
+      columnInsertEdgeCount += segs.length
+    }
+  }
+  if (inserts.length > 0) {
+    console.error(`INSERT entities: ${inserts.length}`)
+  }
+  if (columnInsertEdgeCount > 0) {
+    console.error(
+      `Column INSERT → ${columnInsertEdgeCount} segment(s) (${columnInsertEdgeCount / 4} block(s), ±0.5 unit block → square outline)`,
+    )
+  }
   const segments = snapPlanSegmentsToAxis(
-    rawSegments,
+    expanded,
     header.extMin.x,
     header.extMin.y,
     scale,
@@ -444,7 +611,7 @@ async function main() {
   console.error(
     `Plan flip: flipX=${args.flipX}, flipY=${args.flipY} (default matches --flip-x; use --no-flip-x to disable)`,
   )
-  console.error(`Segments (LINE+LWPOLYLINE edges): ${segments.length}`)
+  console.error(`Segments (LINE+LWPOLYLINE + column INSERT edges): ${segments.length}`)
   if (args.axisSnapToleranceM > 0) {
     console.error(`Axis snap (m): ${args.axisSnapToleranceM} — nearly horizontal/vertical edges aligned to axes`)
   }
@@ -463,6 +630,12 @@ async function main() {
     axisSnapToleranceM: args.axisSnapToleranceM,
     flipX: args.flipX,
     flipY: args.flipY,
+    layerMapping,
+    mergeDoubleWallLines: args.mergeDoubleWallLines,
+    doubleWallMinSpacingM: args.doubleWallMinSpacingM,
+    doubleWallMaxSpacingM: args.doubleWallMaxSpacingM,
+    doubleWallMinOverlapM: args.doubleWallMinOverlapM,
+    doubleWallMinLengthRatio: args.doubleWallMinLengthRatio,
   })
 
   const wallCount = Object.keys(scene.nodes).filter(

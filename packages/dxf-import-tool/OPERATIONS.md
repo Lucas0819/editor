@@ -28,7 +28,7 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--out` / `-o` | 输出的 SceneGraph JSON 路径（默认 `scene-from-dxf.json`） |
 | `--max-walls` | 最多生成多少堵墙（避免一次实体过多） |
 | `--min-length-m` | 忽略短于该长度（米）的线段，默认 `0.02` |
-| `--wall-height` | 墙高（米），默认 `2.5` |
+| `--wall-height` | 墙高（米），默认 `3` |
 | `--wall-thickness` | 墙厚（米），默认 `0.15` |
 | `--no-offset` | 不使用 `$EXTMIN` 平移原点（默认会平移，减小坐标数值） |
 | `--scale-to-meters` | 手动指定「图纸单位 → 米」的乘数（覆盖 HEADER 里 `$INSUNITS` 的换算） |
@@ -40,8 +40,40 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--no-flip-x` | 关闭上述 X 翻转，与 DXF 原始 X 同号 |
 | `--flip-y` | 对 **DXF Y** 取反后再写入第二个分量（Pascal 世界 **Z**）。默认关闭 |
 | `--no-flip-y` | 显式关闭 Y 翻转（默认即为关闭，一般无需写） |
+| `--mapping-file` / `-m` | 图层语义 **覆盖** JSON。与内置 `mapDxfLayerToPascal` 合并：先按图层名（完整 trim，再试 canonical，见 `canonicalDxfLayerName`）查表，未命中则回退内置规则 |
+| `--merge-double-wall-lines` | 将**同楼层、同规范图层名**下、互相平行且间距在「双线墙厚」范围内的线段合并为**一条中心线墙**，`thickness` 取两线在平面上的间距（解决 CAD 双线画墙厚、导入后变两堵墙的问题） |
+| `--double-wall-min-spacing-m` | 与上一项连用：视为双线的最小间距（米），默认 `0.02`（过滤噪声） |
+| `--double-wall-max-spacing-m` | 最大间距（米），默认 `0.65`；超过则认为是两堵独立墙 |
+| `--double-wall-min-overlap-m` | 两线在墙方向上的投影重叠至少多长（米）才合并，默认 `0.04` |
 
 不传 `--layer-regex` 时仍为**单层**（所有墙在同一 `Level`）。
+
+**`--mapping-file` 格式**（`target` / `confidence` 与 `dxf-layer-mapping.ts` 中类型一致）：
+
+```json
+{
+  "version": 1,
+  "layers": {
+    "A-CUSTOM-WALL": {
+      "target": { "kind": "wall" },
+      "confidence": "high"
+    },
+    "ELEV-PIT": {
+      "target": { "kind": "annotation" },
+      "confidence": "medium"
+    }
+  }
+}
+```
+
+### 墙节点命名与图层语义
+
+每个墙段会按 **`dxf-layer-mapping.ts`** 规则写入：
+
+- **`name`**：`{中文语义} · {规范层名}`。
+- **`type`**：按图层映射规则生成 **`wall` / `window` / `door` / `item` / `zone` / `slab` / `roof`**（见 `dxf-layer-mapping.ts`）；**`skip`** 与 **`annotation`** 图层不生成节点。
+- **`metadata`**：`layer`、`dxfLayerCanonical`、`dxfPascalTarget`、`dxfMappingConfidence`。
+- **`skip`**（如 `PUB_HATCH`）与 **`annotation`** 的线段计入 `site.metadata.skippedSemanticLayerSegments`。
 
 ### 可选：按长度过滤线段
 
@@ -64,6 +96,11 @@ const g = await fetch('/demos/from-dxf.json').then((r) => r.json())
 localStorage.setItem('pascal-editor-scene', JSON.stringify(g))
 location.reload()
 ```
+
+## 图层与命名（转换匹配）
+
+- 从 DXF **图层表**读取名称、常见 **工程前缀 / `$` 分隔 / 专业前缀** 的说明，以及与本工具 `--layer-regex` 的对应关系，见同目录 **[LAYERS.md](./LAYERS.md)**。
+- **图纸图层 ↔ Pascal 节点 / 物品 category** 的对应表与 **`mapDxfLayerToPascal()`**，见 [LAYERS.md](./LAYERS.md) 第 5 节与 `src/dxf-layer-mapping.ts`。
 
 ## 限制
 

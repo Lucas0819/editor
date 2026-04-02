@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "description": "与 LAYERS.md §5 对照的示例；键为规范层名（也可写 xref 全名）。未列出的图层仍走 mapDxfLayerToPascal 内置规则。",
+  "layers": {
+    "A-WALL": { "target": { "kind": "wall" }, "confidence": "high" },
+    "WALL": { "target": { "kind": "wall" }, "confidence": "high" },
+    "A-WALL-MOVE": { "target": { "kind": "wall" }, "confidence": "high" },
+    "A-COLU": { "target": { "kind": "wall", "variant": "column_outline" }, "confidence": "medium" },
+    "A-板空洞": { "target": { "kind": "slab" }, "confidence": "medium" },
+    "A-ROOF-DRAN": { "target": { "kind": "roof" }, "confidence": "medium" },
+    "WINDOW": { "target": { "kind": "window" }, "confidence": "high" },
+    "A-WIND": { "target": { "kind": "window" }, "confidence": "high" },
+    "A-WIND-TEXT": { "target": { "kind": "annotation" }, "confidence": "high" },
+    "WINDOW_TEXT": { "target": { "kind": "annotation" }, "confidence": "high" },
+    "DOOR": { "target": { "kind": "door" }, "confidence": "medium" },
+    "A-DOOR": { "target": { "kind": "door" }, "confidence": "medium" },
+    "PUB_HATCH": { "target": { "kind": "skip" }, "confidence": "high" },
+    "A-ANNO-PUB-HATCH": { "target": { "kind": "skip" }, "confidence": "high" },
+    "房间编号": { "target": { "kind": "annotation" }, "confidence": "high" },
+    "E-GENE-文字": { "target": { "kind": "annotation" }, "confidence": "high" },
+    "A-ANNO-PUB-TEXT": { "target": { "kind": "annotation" }, "confidence": "medium" },
+    "洁具": { "target": { "kind": "item", "catalog": "bathroom" }, "confidence": "high" },
+    "LATRINE": { "target": { "kind": "item", "catalog": "bathroom" }, "confidence": "high" },
+    "A-PLAN-LVTRY": { "target": { "kind": "item", "catalog": "bathroom" }, "confidence": "high" },
+    "M-H-散热器片数": { "target": { "kind": "item", "catalog": "appliance" }, "confidence": "medium" },
+    "M-V-排风管设备": { "target": { "kind": "item", "catalog": "appliance" }, "confidence": "medium" },
+    "P-FIRE-消火栓": { "target": { "kind": "item", "catalog": "appliance" }, "confidence": "medium" },
+    "P-FIRE-消火栓-立管": { "target": { "kind": "item", "catalog": "appliance" }, "confidence": "medium" },
+    "A-PLAN-STAIR": { "target": { "kind": "annotation" }, "confidence": "medium" },
+    "A-PLAN-EVTR": { "target": { "kind": "annotation" }, "confidence": "low" },
+    "0": { "target": { "kind": "skip" }, "confidence": "high" },
+    "Defpoints": { "target": { "kind": "skip" }, "confidence": "high" },
+    "北医药物依赖所改造20250422$0$A-WALL": {
+      "target": { "kind": "wall" },
+      "confidence": "high"
+    }
+  }
+}

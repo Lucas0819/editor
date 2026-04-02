@@ -1,6 +1,6 @@
 /**
- * Minimal ASCII DXF parser: HEADER ($INSUNITS, $EXTMIN) + ENTITIES (LINE, LWPOLYLINE only).
- * Sufficient for plan exports; ignores blocks/xrefs.
+ * Minimal ASCII DXF parser: HEADER ($INSUNITS, $EXTMIN) + ENTITIES (LINE, LWPOLYLINE, INSERT).
+ * INSERT 仅用于展开常见柱块（块内 ±0.5 单位正方形）；其它实体类型忽略。
  */
 
 export type DxfHeader = {
@@ -15,6 +15,18 @@ export type PlanSegment = {
   x1: number
   y1: number
   layer: string
+  /** 由 INSERT 块展开得到的边，不参与双线合并 */
+  fromInsert?: boolean
+}
+
+/** ENTITIES 中 INSERT：插入点 + XY 比例（相对块定义，常见柱块为 ±0.5 正方形） */
+export type PlanInsert = {
+  layer: string
+  bx: number
+  by: number
+  sx: number
+  sy: number
+  rotationDeg: number
 }
 
 function trimPair(line: string | undefined): string {
@@ -154,6 +166,77 @@ function parseLwPolylineEntity(
   return { segments: [], next: start }
 }
 
+function parseInsertEntity(
+  lines: string[],
+  start: number,
+): { insert: PlanInsert | null; next: number } {
+  let i = start
+  let layer = ''
+  let bx = 0
+  let by = 0
+  let sx = 1
+  let sy = 1
+  let rot = 0
+  while (i < lines.length - 1) {
+    const code = Number(lines[i])
+    const val = lines[i + 1]
+    i += 2
+    if (code === 0) {
+      if (!Number.isFinite(sx) || sx === 0) {
+        sx = 1
+      }
+      if (!Number.isFinite(sy) || sy === 0) {
+        sy = 1
+      }
+      if (!Number.isFinite(rot)) {
+        rot = 0
+      }
+      return {
+        insert: { layer, bx, by, sx, sy, rotationDeg: rot },
+        next: i - 2,
+      }
+    }
+    if (code === 8) layer = trimPair(val)
+    if (code === 10) bx = Number.parseFloat(trimPair(val))
+    if (code === 20) by = Number.parseFloat(trimPair(val))
+    if (code === 41) sx = Number.parseFloat(trimPair(val))
+    if (code === 42) sy = Number.parseFloat(trimPair(val))
+    if (code === 50) rot = Number.parseFloat(trimPair(val))
+  }
+  return { insert: null, next: start }
+}
+
+/**
+ * 将 INSERT 按「块为 ±0.5 单位正方形」展开为四条边（与天正等柱块 _FZH 一致）。
+ * 仅应在图层映射为 column_outline 时调用。
+ */
+export function insertBlockToColumnOutlineSegments(ins: PlanInsert): PlanSegment[] {
+  const { bx, by, sx, sy, rotationDeg, layer } = ins
+  const hw = sx * 0.5
+  const hh = sy * 0.5
+  const corners: [number, number][] = [
+    [-hw, -hh],
+    [hw, -hh],
+    [hw, hh],
+    [-hw, hh],
+  ]
+  const rad = (rotationDeg * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  const world = corners.map(([lx, ly]) => {
+    const rx = lx * cos - ly * sin
+    const ry = lx * sin + ly * cos
+    return [bx + rx, by + ry] as [number, number]
+  })
+  const segs: PlanSegment[] = []
+  for (let k = 0; k < 4; k++) {
+    const a = world[k]!
+    const b = world[(k + 1) % 4]!
+    segs.push({ x0: a[0], y0: a[1], x1: b[0], y1: b[1], layer, fromInsert: true })
+  }
+  return segs
+}
+
 function skipUnknownEntity(lines: string[], start: number): number {
   let i = start
   while (i < lines.length - 1) {
@@ -200,6 +283,8 @@ export function insUnitsToMetersFactor(insUnits: number): number {
 export function parseDxfPlanSegments(text: string): {
   header: DxfHeader
   segments: PlanSegment[]
+  /** 未展开的 INSERT；由 dxf-to-scene 按图层是否为柱再展开为 segments */
+  inserts: PlanInsert[]
 } {
   const lines = text.split(/\r?\n/)
   const headerIdx = findSection(lines, 'HEADER')
@@ -208,11 +293,12 @@ export function parseDxfPlanSegments(text: string): {
 
   const entIdx = findSection(lines, 'ENTITIES')
   if (entIdx < 0) {
-    return { header, segments: [] }
+    return { header, segments: [], inserts: [] }
   }
 
   let i = entIdx
   const segments: PlanSegment[] = []
+  const inserts: PlanInsert[] = []
 
   while (i < lines.length - 1) {
     const code = Number(lines[i])
@@ -235,10 +321,18 @@ export function parseDxfPlanSegments(text: string): {
       segments.push(...segs)
       continue
     }
+    if (code === 0 && trimPair(val) === 'INSERT') {
+      const { insert, next } = parseInsertEntity(lines, i)
+      i = next
+      if (insert) {
+        inserts.push(insert)
+      }
+      continue
+    }
     if (code === 0) {
       i = skipUnknownEntity(lines, i)
     }
   }
 
-  return { header, segments }
+  return { header, segments, inserts }
 }
