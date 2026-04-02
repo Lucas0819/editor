@@ -246,7 +246,7 @@ export type MergeDoubleWallResult = {
 
 /**
  * 按楼层 + 规范图层名分组，在组内将「双线」合并为单段中心线。
- * `fromInsert` 的线段不参与合并（柱块展开后的四边）。
+ * `fromInsert` 的线段不参与合并（柱 INSERT 单根中心线等）。
  */
 export function mergeDoubleWallLineSegments(
   tagged: TaggedWallSegment[],

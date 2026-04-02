@@ -110,9 +110,9 @@ location.reload()
 - 与 **墙线段**（同坐标变换与轴对齐）做关联：插入点投影到墙中心线、**宽度**取 `max(|41|,|42|)`×图纸单位→米（与 `$INSUNITS` 一致）。
 - **优先**落在已有墙段上：在父墙 `children` 中生成 `window` / `door`（墙局部坐标与 `example/墙体内有门和窗.json` 默认一致：窗高 1.5m、中心 1.5m；门高 2.1m、中心 1.05m）。
 - **若**无法贴墙（无墙或偏离过大）：用最近墙方向生成**短墙**再挂门/窗（`metadata.dxfOpeningSyntheticWall`）。
-- 柱块 **INSERT**（图层映射为 `column_outline`）仍只展开为柱轮廓，不参与门窗。
+- 柱块 **INSERT**（图层映射为 `column_outline`）由 `dxf-column-inserts.ts` 转为**单根墙**（对边中点连线 + 厚度 `|sy|×` 比例→米）；若图纸用 **LINE/LWPOLYLINE** 画**轴对齐矩形**四条边，同模块会将四边**合并**为一条并写入 `columnThicknessM`，不参与门窗匹配。
 
 ## 限制
 
-- 仅解析 **LINE / LWPOLYLINE**；块参照中除柱轮廓与**上述门窗块**外，其它块未展开。
+- 仅解析 **LINE / LWPOLYLINE**；块参照中除**柱 INSERT**与**上述门窗块**外，其它块未展开。
 - 结果为「竖直墙条 + 门窗洞口」可视化，不是完整 BIM（房间、屋顶等需另建管线）。

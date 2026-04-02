@@ -21,8 +21,11 @@ import {
 } from './layer-level.ts'
 import { snapPlanSegmentsToAxis } from './axis-snap.ts'
 import {
+  columnInsertToSquareWallSegment,
+  mergeColumnOutlineAxisAlignedRectangles,
+} from './dxf-column-inserts.ts'
+import {
   insUnitsToMetersFactor,
-  insertBlockToColumnOutlineSegments,
   type PlanInsert,
   type PlanSegment,
   parseDxfPlanSegments,
@@ -405,11 +408,30 @@ function buildSceneGraph(
     wallPieces = stub.merged
   }
 
-  /** 承重柱（column_outline）：平面边长即柱宽方向尺寸，墙厚与边长一致时更接近正方形柱体 */
+  let columnOutlineRectanglesMerged = 0
+  {
+    const mr = mergeColumnOutlineAxisAlignedRectangles(wallPieces, {
+      ox,
+      oy,
+      scale,
+      offset: opts.offset,
+      flipX: opts.flipX,
+      flipY: opts.flipY,
+      defaultThicknessM: opts.wallThickness,
+    })
+    wallPieces = mr.merged
+    columnOutlineRectanglesMerged = mr.rectanglesMerged
+  }
+
+  /** 承重柱（column_outline）：柱 INSERT 用 `columnThicknessM`（sx/sy×比例）；纯线段仍按边长估厚 */
   const columnOutlineThicknessCapM = 3
   wallPieces = wallPieces.map((w) => {
     if (w.mapping.target.kind !== 'wall' || w.mapping.target.variant !== 'column_outline') {
       return w
+    }
+    if (w.seg.columnThicknessM !== undefined) {
+      const t = Math.min(Math.max(w.seg.columnThicknessM, opts.wallThickness), columnOutlineThicknessCapM)
+      return { ...w, thicknessM: t }
     }
     const lenM = segmentLengthM(w.seg, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
     const t = Math.min(Math.max(lenM, opts.wallThickness), columnOutlineThicknessCapM)
@@ -498,6 +520,9 @@ function buildSceneGraph(
   }
   if (redundantCornerStubsRemoved > 0) {
     siteMeta.redundantCornerStubsRemoved = redundantCornerStubsRemoved
+  }
+  if (columnOutlineRectanglesMerged > 0) {
+    siteMeta.columnOutlineRectanglesMerged = columnOutlineRectanglesMerged
   }
 
   const flatWallPieces: WallPiece[] = []
@@ -807,21 +832,21 @@ async function main() {
   const { header, segments: rawSegments, inserts } = parseDxfPlanSegments(text)
   const scale = args.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
   const expanded: PlanSegment[] = [...rawSegments]
-  let columnInsertEdgeCount = 0
+  let columnInsertWallCount = 0
   for (const ins of inserts) {
     const map = resolveLayerMapping(ins.layer, layerMapping?.map ?? null)
     if (map.target.kind === 'wall' && map.target.variant === 'column_outline') {
-      const segs = insertBlockToColumnOutlineSegments(ins)
-      expanded.push(...segs)
-      columnInsertEdgeCount += segs.length
+      const { seg, thicknessM } = columnInsertToSquareWallSegment(ins, scale)
+      expanded.push({ ...seg, columnThicknessM: thicknessM })
+      columnInsertWallCount++
     }
   }
   if (inserts.length > 0) {
     console.error(`INSERT entities: ${inserts.length}`)
   }
-  if (columnInsertEdgeCount > 0) {
+  if (columnInsertWallCount > 0) {
     console.error(
-      `Column INSERT → ${columnInsertEdgeCount} segment(s) (${columnInsertEdgeCount / 4} block(s), ±0.5 unit block → square outline)`,
+      `Column INSERT → ${columnInsertWallCount} wall(s) (single centerline; thickness = |sy|×scale m, length = |sx|×scale m)`,
     )
   }
   const segments = snapPlanSegmentsToAxis(
