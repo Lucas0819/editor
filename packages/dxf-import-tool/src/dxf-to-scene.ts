@@ -28,6 +28,9 @@ import {
 import {
   parseDxfLayerMappingFileJson,
   resolveLayerMapping,
+  resolveLevelIndexForDxfRawSegment,
+  transformDxfPointForLevel,
+  type DxfFloorPlan,
   type DxfLayerMapping,
   type ParsedDxfLayerMappingFile,
 } from './dxf-layer-mapping.ts'
@@ -173,25 +176,6 @@ function parseArgs(argv: string[]) {
   }
 }
 
-function transformPoint(
-  x: number,
-  y: number,
-  ox: number,
-  oy: number,
-  scale: number,
-  useOffset: boolean,
-  flipX: boolean,
-  flipY: boolean,
-): [number, number] {
-  const px = useOffset ? x - ox : x
-  const py = useOffset ? y - oy : y
-  let mx = px * scale
-  let my = py * scale
-  if (flipX) mx = -mx
-  if (flipY) my = -my
-  return [mx, my]
-}
-
 function segmentLengthM(
   s: PlanSegment,
   ox: number,
@@ -200,9 +184,33 @@ function segmentLengthM(
   useOffset: boolean,
   flipX: boolean,
   flipY: boolean,
+  floorPlan: DxfFloorPlan | null,
+  levelIndex: number,
 ): number {
-  const [x0, y0] = transformPoint(s.x0, s.y0, ox, oy, scale, useOffset, flipX, flipY)
-  const [x1, y1] = transformPoint(s.x1, s.y1, ox, oy, scale, useOffset, flipX, flipY)
+  const [x0, y0] = transformDxfPointForLevel(
+    s.x0,
+    s.y0,
+    levelIndex,
+    floorPlan,
+    ox,
+    oy,
+    scale,
+    useOffset,
+    flipX,
+    flipY,
+  )
+  const [x1, y1] = transformDxfPointForLevel(
+    s.x1,
+    s.y1,
+    levelIndex,
+    floorPlan,
+    ox,
+    oy,
+    scale,
+    useOffset,
+    flipX,
+    flipY,
+  )
   const dx = x1 - x0
   const dy = y1 - y0
   return Math.hypot(dx, dy)
@@ -227,15 +235,17 @@ function bboxFromSegments(
   useOffset: boolean,
   flipX: boolean,
   flipY: boolean,
+  floorPlan: DxfFloorPlan | null,
 ): { minX: number; maxX: number; minY: number; maxY: number } | null {
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
   let minY = Number.POSITIVE_INFINITY
   let maxY = Number.NEGATIVE_INFINITY
   for (const s of segments) {
+    const li = resolveLevelIndexForDxfRawSegment(s.x0, s.y0, s.x1, s.y1, floorPlan)
     for (const [x, y] of [
-      transformPoint(s.x0, s.y0, ox, oy, scale, useOffset, flipX, flipY),
-      transformPoint(s.x1, s.y1, ox, oy, scale, useOffset, flipX, flipY),
+      transformDxfPointForLevel(s.x0, s.y0, li, floorPlan, ox, oy, scale, useOffset, flipX, flipY),
+      transformDxfPointForLevel(s.x1, s.y1, li, floorPlan, ox, oy, scale, useOffset, flipX, flipY),
     ]) {
       minX = Math.min(minX, x)
       maxX = Math.max(maxX, x)
@@ -277,6 +287,7 @@ function buildSceneGraph(
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
   const ox = header.extMin.x
   const oy = header.extMin.y
+  const fp = opts.layerMapping?.floorPlan ?? null
 
   type Tagged = { seg: PlanSegment; levelIndex: number; mapping: DxfLayerMapping }
   const tagged: Tagged[] = []
@@ -292,7 +303,8 @@ function buildSceneGraph(
       skippedSemanticLayerSegments++
       continue
     }
-    const lenM = segmentLengthM(s, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
+    const levelIndex = resolveLevelIndexForDxfRawSegment(s.x0, s.y0, s.x1, s.y1, fp)
+    const lenM = segmentLengthM(s, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, levelIndex)
     if (lenM < opts.minLenM) {
       continue
     }
@@ -301,7 +313,6 @@ function buildSceneGraph(
       continue
     }
 
-    const levelIndex = 0
     tagged.push({ seg: s, levelIndex, mapping })
   }
 
@@ -391,7 +402,7 @@ function buildSceneGraph(
       const t = Math.min(Math.max(w.seg.columnThicknessM, opts.wallThickness), columnOutlineThicknessCapM)
       return { ...w, thicknessM: t }
     }
-    const lenM = segmentLengthM(w.seg, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
+    const lenM = segmentLengthM(w.seg, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, w.levelIndex)
     const t = Math.min(Math.max(lenM, opts.wallThickness), columnOutlineThicknessCapM)
     return { ...w, thicknessM: t }
   })
@@ -410,7 +421,7 @@ function buildSceneGraph(
     byLevel.set(0, [])
   }
 
-  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY)
+  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp)
   const margin = 2
   const polygon =
     bb === null
@@ -450,6 +461,17 @@ function buildSceneGraph(
   }
   if (opts.layerMapping && opts.layerMapping.layerCount > 0) {
     siteMeta.layerMappingLayers = opts.layerMapping.layerCount
+  }
+  if (fp && fp.levels.length > 0) {
+    siteMeta.dxfFloorPlan = {
+      levelCount: fp.levelCount,
+      splitAxis: fp.splitAxis,
+      levels: fp.levels.map((L) => ({
+        levelIndex: L.levelIndex,
+        labels: L.labels,
+        range: L.range,
+      })),
+    }
   }
   if (opts.maxSegmentLengthM > 0) {
     siteMeta.maxSegmentLengthM = opts.maxSegmentLengthM
@@ -495,6 +517,7 @@ function buildSceneGraph(
           layerMapping: opts.layerMapping,
           unitToMeters: scale,
           defaultWallThicknessM: opts.wallThickness,
+          floorPlan: fp,
         })
       : []
 
@@ -544,13 +567,17 @@ function buildSceneGraph(
   for (const li of levelIndices) {
     const levelId = nid('level')
     levelNodeIds.push(levelId)
-    const levelName = `楼层 ${nameSeq.next()}`
+    const floorEntry = fp?.levels.find((L) => L.levelIndex === li)
+    const floorLabels = floorEntry?.labels
+    const levelName = floorLabels?.[0] ?? `楼层 ${nameSeq.next()}`
     const segs = byLevel.get(li) ?? []
     const wallIds: string[] = []
     for (const { seg: s, mapping, thicknessM, fromDoubleLineMerge } of segs) {
-      const [sx, sy] = transformPoint(
+      const [sx, sy] = transformDxfPointForLevel(
         s.x0,
         s.y0,
+        li,
+        fp,
         ox,
         oy,
         scale,
@@ -558,9 +585,11 @@ function buildSceneGraph(
         opts.flipX,
         opts.flipY,
       )
-      const [ex, ey] = transformPoint(
+      const [ex, ey] = transformDxfPointForLevel(
         s.x1,
         s.y1,
+        li,
+        fp,
         ox,
         oy,
         scale,
@@ -587,7 +616,7 @@ function buildSceneGraph(
             parentId: wid,
             visible: true,
             metadata: {
-              ...baseDxfMetadata(ins.layer, li, mapIns),
+              ...baseDxfMetadata(ins.layer, li, mapIns, { dxfFloorLabels: floorLabels }),
               dxfOpeningBlock: canonicalBlockName(ins.blockName),
             },
             position: [op.localX, DXF_IMPORT_WINDOW_CENTER_Y, 0],
@@ -609,7 +638,7 @@ function buildSceneGraph(
             parentId: wid,
             visible: true,
             metadata: {
-              ...baseDxfMetadata(ins.layer, li, mapIns),
+              ...baseDxfMetadata(ins.layer, li, mapIns, { dxfFloorLabels: floorLabels }),
               dxfOpeningBlock: canonicalBlockName(ins.blockName),
             },
             position: [op.localX, DXF_IMPORT_DOOR_CENTER_Y, 0],
@@ -631,7 +660,7 @@ function buildSceneGraph(
         parentId: levelId,
         visible: true,
         metadata: {
-          ...baseDxfMetadata(s.layer, li, mapping),
+          ...baseDxfMetadata(s.layer, li, mapping, { dxfFloorLabels: floorLabels }),
           ...(fromDoubleLineMerge ? { dxfMergedDoubleWall: true } : {}),
         },
         children: childIds,
@@ -663,7 +692,7 @@ function buildSceneGraph(
           parentId: wid,
           visible: true,
           metadata: {
-            ...baseDxfMetadata(ins.layer, li, mapIns),
+            ...baseDxfMetadata(ins.layer, li, mapIns, { dxfFloorLabels: floorLabels }),
             dxfOpeningBlock: canonicalBlockName(ins.blockName),
             dxfOpeningSyntheticWall: true,
           },
@@ -685,7 +714,7 @@ function buildSceneGraph(
           parentId: wid,
           visible: true,
           metadata: {
-            ...baseDxfMetadata(ins.layer, li, mapIns),
+            ...baseDxfMetadata(ins.layer, li, mapIns, { dxfFloorLabels: floorLabels }),
             dxfOpeningBlock: canonicalBlockName(ins.blockName),
             dxfOpeningSyntheticWall: true,
           },
@@ -706,7 +735,7 @@ function buildSceneGraph(
         parentId: levelId,
         visible: true,
         metadata: {
-          ...baseDxfMetadata(syn.layer, li, syn.mapping),
+          ...baseDxfMetadata(syn.layer, li, syn.mapping, { dxfFloorLabels: floorLabels }),
           dxfOpeningSyntheticWall: true,
           ...(syn.fromDoubleLineMerge ? { dxfMergedDoubleWall: true } : {}),
         },
@@ -728,6 +757,8 @@ function buildSceneGraph(
       name: levelName,
       metadata: {
         dxfLayerFloor: li + 1,
+        dxfFloorPlanLevelIndex: li,
+        ...(floorLabels?.length ? { dxfFloorLabels: floorLabels } : {}),
       },
       children: wallIds,
       level: li,

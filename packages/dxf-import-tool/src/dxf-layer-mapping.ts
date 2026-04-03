@@ -240,10 +240,217 @@ function parseConfidence(raw: unknown): 'high' | 'medium' | 'low' {
   throw new Error(`confidence must be "high" | "medium" | "low", got ${String(raw)}`)
 }
 
+/** 与 agent 生成的 `floorPlan` 块一致：多楼层沿 DXF 轴分段（通常为 Y） */
+export type DxfFloorPlanAxisRange =
+  | { yMin: number | null; yMax: number | null }
+  | { xMin: number | null; xMax: number | null }
+
+export type DxfFloorPlanLevelEntry = {
+  levelIndex: number
+  labels: string[]
+  range: DxfFloorPlanAxisRange
+}
+
+export type DxfFloorPlan = {
+  schemaVersion: number
+  levelCount: number
+  splitAxis: 'x' | 'y'
+  coordinateSpace: 'dxf_raw'
+  levels: DxfFloorPlanLevelEntry[]
+}
+
 export type ParsedDxfLayerMappingFile = {
   map: Map<string, DxfLayerMapping>
   /** `layers` 对象中的条目数（不含为 canonical 名自动追加的键） */
   layerCount: number
+  /** 可选：多楼层分段；无则全部落在 `levelIndex === 0` */
+  floorPlan: DxfFloorPlan | null
+}
+
+/**
+ * 线段中点或 INSERT 插入点（DXF 原始坐标）→ `floorPlan` 中的 `levelIndex`。
+ * 区间左闭右开 `[yMin, yMax)`；`yMax === null` 表示无上界（屋顶等）。
+ */
+export function resolveLevelIndexForDxfRawPoint(
+  x: number,
+  y: number,
+  floorPlan: DxfFloorPlan | null,
+): number {
+  if (!floorPlan || floorPlan.levels.length === 0) {
+    return 0
+  }
+  const axis = floorPlan.splitAxis === 'x' ? x : y
+  const sorted = [...floorPlan.levels].sort((a, b) => a.levelIndex - b.levelIndex)
+  for (const L of sorted) {
+    const r = L.range
+    const lo =
+      'yMin' in r ? (r.yMin ?? Number.NEGATIVE_INFINITY) : (r.xMin ?? Number.NEGATIVE_INFINITY)
+    const hiRaw = 'yMax' in r ? r.yMax : r.xMax
+    const hi = hiRaw === null || hiRaw === undefined ? Number.POSITIVE_INFINITY : hiRaw
+    if (axis >= lo && axis < hi) {
+      return L.levelIndex
+    }
+  }
+  const first = sorted[0]!
+  const last = sorted[sorted.length - 1]!
+  const r0 = first.range
+  const lo0 = 'yMin' in r0 ? (r0.yMin ?? Number.NEGATIVE_INFINITY) : (r0.xMin ?? Number.NEGATIVE_INFINITY)
+  if (axis < lo0) {
+    return first.levelIndex
+  }
+  return last.levelIndex
+}
+
+/** 线段中点归属楼层（与 INSERT 点规则一致） */
+export function resolveLevelIndexForDxfRawSegment(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  floorPlan: DxfFloorPlan | null,
+): number {
+  return resolveLevelIndexForDxfRawPoint((x0 + x1) / 2, (y0 + y1) / 2, floorPlan)
+}
+
+/**
+ * DXF 原始坐标 + 楼层锚点（减去该层 `yMin` / `xMin`）→ 再按 EXTMIN 与比例变换到场景平面（墙 start/end 所用系）。
+ */
+export function transformDxfPointForLevel(
+  x: number,
+  y: number,
+  levelIndex: number,
+  floorPlan: DxfFloorPlan | null,
+  ox: number,
+  oy: number,
+  scale: number,
+  useOffset: boolean,
+  flipX: boolean,
+  flipY: boolean,
+): [number, number] {
+  let px = x
+  let py = y
+  if (floorPlan) {
+    const entry = floorPlan.levels.find((l) => l.levelIndex === levelIndex)
+    if (entry) {
+      const r = entry.range
+      if (floorPlan.splitAxis === 'y' && 'yMin' in r && r.yMin != null) {
+        py = y - r.yMin
+      } else if (floorPlan.splitAxis === 'x' && 'xMin' in r && r.xMin != null) {
+        px = x - r.xMin
+      }
+    }
+  }
+  const jx = useOffset ? px - ox : px
+  const jy = useOffset ? py - oy : py
+  let mx = jx * scale
+  let my = jy * scale
+  if (flipX) mx = -mx
+  if (flipY) my = -my
+  return [mx, my]
+}
+
+/** `transformDxfPointForLevel` 的逆变换，得到 DXF 原始坐标 */
+export function inverseTransformDxfPointForLevel(
+  mx: number,
+  my: number,
+  levelIndex: number,
+  floorPlan: DxfFloorPlan | null,
+  ox: number,
+  oy: number,
+  scale: number,
+  useOffset: boolean,
+  flipX: boolean,
+  flipY: boolean,
+): [number, number] {
+  let mxx = mx
+  let myy = my
+  if (flipX) mxx = -mxx
+  if (flipY) myy = -myy
+  const px = mxx / scale
+  const py = myy / scale
+  let x = useOffset ? px + ox : px
+  let y = useOffset ? py + oy : py
+  if (floorPlan) {
+    const entry = floorPlan.levels.find((l) => l.levelIndex === levelIndex)
+    if (entry) {
+      const r = entry.range
+      if (floorPlan.splitAxis === 'y' && 'yMin' in r && r.yMin != null) {
+        y = y + r.yMin
+      } else if (floorPlan.splitAxis === 'x' && 'xMin' in r && r.xMin != null) {
+        x = x + r.xMin
+      }
+    }
+  }
+  return [x, y]
+}
+
+function parseDxfFloorPlanLevelEntry(raw: unknown, splitAxis: 'x' | 'y'): DxfFloorPlanLevelEntry {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('floorPlan.levels[] entry must be an object')
+  }
+  const o = raw as Record<string, unknown>
+  const levelIndex = o.levelIndex
+  if (typeof levelIndex !== 'number' || !Number.isFinite(levelIndex)) {
+    throw new Error('floorPlan.levels[].levelIndex must be a finite number')
+  }
+  const labelsRaw = o.labels
+  const labels = Array.isArray(labelsRaw)
+    ? labelsRaw.filter((x): x is string => typeof x === 'string')
+    : []
+  const range = o.range
+  if (range === null || typeof range !== 'object' || Array.isArray(range)) {
+    throw new Error('floorPlan.levels[].range must be an object')
+  }
+  const rr = range as Record<string, unknown>
+  if (splitAxis === 'y') {
+    const yMin = rr.yMin === null || rr.yMin === undefined ? null : Number(rr.yMin)
+    const yMax = rr.yMax === null || rr.yMax === undefined ? null : Number(rr.yMax)
+    if (yMin !== null && !Number.isFinite(yMin)) {
+      throw new Error('floorPlan.levels[].range.yMin must be number | null')
+    }
+    if (yMax !== null && !Number.isFinite(yMax)) {
+      throw new Error('floorPlan.levels[].range.yMax must be number | null')
+    }
+    return { levelIndex, labels, range: { yMin, yMax } }
+  }
+  const xMin = rr.xMin === null || rr.xMin === undefined ? null : Number(rr.xMin)
+  const xMax = rr.xMax === null || rr.xMax === undefined ? null : Number(rr.xMax)
+  if (xMin !== null && !Number.isFinite(xMin)) {
+    throw new Error('floorPlan.levels[].range.xMin must be number | null')
+  }
+  if (xMax !== null && !Number.isFinite(xMax)) {
+    throw new Error('floorPlan.levels[].range.xMax must be number | null')
+  }
+  return { levelIndex, labels, range: { xMin, xMax } }
+}
+
+function parseDxfFloorPlanFromJson(raw: unknown): DxfFloorPlan | null {
+  if (raw === undefined || raw === null) {
+    return null
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('floorPlan must be an object or omitted')
+  }
+  const o = raw as Record<string, unknown>
+  const schemaVersion = o.schemaVersion
+  if (schemaVersion !== 1) {
+    throw new Error('floorPlan.schemaVersion must be 1')
+  }
+  const splitAxis = o.splitAxis
+  if (splitAxis !== 'x' && splitAxis !== 'y') {
+    throw new Error('floorPlan.splitAxis must be "x" | "y"')
+  }
+  const coordinateSpace = o.coordinateSpace
+  if (coordinateSpace !== 'dxf_raw') {
+    throw new Error('floorPlan.coordinateSpace must be "dxf_raw"')
+  }
+  const levelsRaw = o.levels
+  if (!Array.isArray(levelsRaw)) {
+    throw new Error('floorPlan.levels must be an array')
+  }
+  const levels = levelsRaw.map((L) => parseDxfFloorPlanLevelEntry(L, splitAxis))
+  const levelCount = typeof o.levelCount === 'number' && Number.isFinite(o.levelCount) ? o.levelCount : levels.length
+  return { schemaVersion: 1, levelCount, splitAxis, coordinateSpace: 'dxf_raw', levels }
 }
 
 /**
@@ -282,5 +489,6 @@ export function parseDxfLayerMappingFileJson(text: string): ParsedDxfLayerMappin
       out.set(canon, mapping)
     }
   }
-  return { map: out, layerCount: layerEntries.length }
+  const floorPlan = parseDxfFloorPlanFromJson(obj.floorPlan)
+  return { map: out, layerCount: layerEntries.length, floorPlan }
 }

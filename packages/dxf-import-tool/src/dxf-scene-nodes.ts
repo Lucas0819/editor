@@ -90,14 +90,19 @@ export function baseDxfMetadata(
   layer: string,
   li: number,
   mapping: DxfLayerMapping,
+  opts?: { dxfFloorLabels?: string[] },
 ): Record<string, unknown> {
+  const canon = canonicalDxfLayerName(layer)
+  const tgt = dxfTargetToJson(mapping.target)
   return {
     source: 'dxf-import',
     layer,
-    dxfLayerCanonical: canonicalDxfLayerName(layer),
-    dxfPascalTarget: dxfTargetToJson(mapping.target),
+    dxfLayerCanonical: canon,
+    dxfPascalTarget: tgt,
     dxfMappingConfidence: mapping.confidence,
     levelIndex: li,
+    dxfCorrespondenceKey: `${canon}|${JSON.stringify(tgt)}`,
+    ...(opts?.dxfFloorLabels?.length ? { dxfFloorLabels: opts.dxfFloorLabels } : {}),
   }
 }
 

@@ -2,8 +2,13 @@
  * DXF INSERT（天正/通用门窗块）→ 墙上 window/door 子节点；无法落墙时生成同向短墙（统一管线）。
  */
 
-import type { DxfLayerMapping, ParsedDxfLayerMappingFile } from './dxf-layer-mapping.ts'
-import { resolveLayerMapping } from './dxf-layer-mapping.ts'
+import type { DxfFloorPlan, DxfLayerMapping, ParsedDxfLayerMappingFile } from './dxf-layer-mapping.ts'
+import {
+  inverseTransformDxfPointForLevel,
+  resolveLayerMapping,
+  resolveLevelIndexForDxfRawPoint,
+  transformDxfPointForLevel,
+} from './dxf-layer-mapping.ts'
 import type { PlanInsert } from './parse-dxf-entities.ts'
 
 export type OpeningKind = 'window' | 'door'
@@ -45,25 +50,6 @@ export function openingWidthMetersFromInsert(
     return 0.9 * unitToMeters
   }
   return raw * unitToMeters
-}
-
-function transformPoint(
-  x: number,
-  y: number,
-  ox: number,
-  oy: number,
-  scale: number,
-  useOffset: boolean,
-  flipX: boolean,
-  flipY: boolean,
-): [number, number] {
-  const px = useOffset ? x - ox : x
-  const py = useOffset ? y - oy : y
-  let mx = px * scale
-  let my = py * scale
-  if (flipX) mx = -mx
-  if (flipY) my = -my
-  return [mx, my]
 }
 
 /** 到有限线段的欧氏距离 + 最近点参数 t∈[0,1]（用于「最近墙段」唯一归属） */
@@ -150,7 +136,7 @@ export type OpeningSynthetic = {
 
 export type OpeningResolved = OpeningAttach | OpeningSynthetic
 
-/** 与 `transformPoint` 一致：用于 INSERT 场景朝向（合成短墙中心线沿块宽方向）。 */
+/** 与 `dxf-to-scene` 平面变换一致；`floorPlan` 存在时按层减掉 DXF 轴锚点。 */
 export type OpeningTransformOpts = {
   ox: number
   oy: number
@@ -158,6 +144,22 @@ export type OpeningTransformOpts = {
   offset: boolean
   flipX: boolean
   flipY: boolean
+  floorPlan?: DxfFloorPlan | null
+}
+
+function tpScene(x: number, y: number, levelIndex: number, opts: OpeningTransformOpts): [number, number] {
+  return transformDxfPointForLevel(
+    x,
+    y,
+    levelIndex,
+    opts.floorPlan ?? null,
+    opts.ox,
+    opts.oy,
+    opts.scale,
+    opts.offset,
+    opts.flipX,
+    opts.flipY,
+  )
 }
 
 /** INSERT 块 +X 在场景平面上的朝向（弧度），与墙 mesh 的 atan2(end-start) 同系。 */
@@ -199,46 +201,13 @@ function attachProjectToWallInsert(
   ins: PlanInsert,
   wi: number,
   flatWallPieces: WallPieceForOpenings[],
-  opts: {
-    ox: number
-    oy: number
-    scale: number
-    offset: boolean
-    flipX: boolean
-    flipY: boolean
-  },
+  opts: OpeningTransformOpts,
 ): { tClamped: number; len: number } | null {
-  const [px, pz] = transformPoint(
-    ins.bx,
-    ins.by,
-    opts.ox,
-    opts.oy,
-    opts.scale,
-    opts.offset,
-    opts.flipX,
-    opts.flipY,
-  )
+  const li = flatWallPieces[wi]!.levelIndex
+  const [px, pz] = tpScene(ins.bx, ins.by, li, opts)
   const s = flatWallPieces[wi]!.seg
-  const [sx, sy] = transformPoint(
-    s.x0,
-    s.y0,
-    opts.ox,
-    opts.oy,
-    opts.scale,
-    opts.offset,
-    opts.flipX,
-    opts.flipY,
-  )
-  const [ex, ey] = transformPoint(
-    s.x1,
-    s.y1,
-    opts.ox,
-    opts.oy,
-    opts.scale,
-    opts.offset,
-    opts.flipX,
-    opts.flipY,
-  )
+  const [sx, sy] = tpScene(s.x0, s.y0, li, opts)
+  const [ex, ey] = tpScene(s.x1, s.y1, li, opts)
   const { tParam, len } = pointToFiniteSegment(px, pz, sx, sy, ex, ey)
   if (len < 1e-6) {
     return null
@@ -273,15 +242,7 @@ function clampedLocalXOpening(len: number, widthM: number, tClamped: number): nu
 function fixCornerAttachClusters(
   out: OpeningResolved[],
   flatWallPieces: WallPieceForOpenings[],
-  opts: {
-    ox: number
-    oy: number
-    scale: number
-    offset: boolean
-    flipX: boolean
-    flipY: boolean
-    unitToMeters: number
-  },
+  opts: OpeningTransformOpts & { unitToMeters: number },
 ): void {
   const attachIdx = out
     .map((o, i) => (o.mode === 'attach' ? i : -1))
@@ -289,26 +250,9 @@ function fixCornerAttachClusters(
 
   const segmentTheta = (wi: number): number => {
     const s = flatWallPieces[wi]!.seg
-    const [sx, sy] = transformPoint(
-      s.x0,
-      s.y0,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [ex, ey] = transformPoint(
-      s.x1,
-      s.y1,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const li = flatWallPieces[wi]!.levelIndex
+    const [sx, sy] = tpScene(s.x0, s.y0, li, opts)
+    const [ex, ey] = tpScene(s.x1, s.y1, li, opts)
     return Math.atan2(ey - sy, ex - sx)
   }
 
@@ -317,51 +261,17 @@ function fixCornerAttachClusters(
 
   const sumDistToWallLine = (px: number, pz: number, wi: number): number => {
     const s = flatWallPieces[wi]!.seg
-    const [sx, sy] = transformPoint(
-      s.x0,
-      s.y0,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [ex, ey] = transformPoint(
-      s.x1,
-      s.y1,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const li = flatWallPieces[wi]!.levelIndex
+    const [sx, sy] = tpScene(s.x0, s.y0, li, opts)
+    const [ex, ey] = tpScene(s.x1, s.y1, li, opts)
     return pointToLineDistance(px, pz, sx, sy, ex, ey)
   }
 
   const segmentLenScene = (wi: number): number => {
     const s = flatWallPieces[wi]!.seg
-    const [sx, sy] = transformPoint(
-      s.x0,
-      s.y0,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [ex, ey] = transformPoint(
-      s.x1,
-      s.y1,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const li = flatWallPieces[wi]!.levelIndex
+    const [sx, sy] = tpScene(s.x0, s.y0, li, opts)
+    const [ex, ey] = tpScene(s.x1, s.y1, li, opts)
     return Math.hypot(ex - sx, ey - sy)
   }
 
@@ -376,30 +286,16 @@ function fixCornerAttachClusters(
       }
       const wa = oa.wallIndex
       const wb = ob.wallIndex
+      if (flatWallPieces[wa]!.levelIndex !== flatWallPieces[wb]!.levelIndex) {
+        continue
+      }
       if (!perpendicularWalls(wa, wb)) {
         continue
       }
 
-      const [pxa, pza] = transformPoint(
-        oa.insert.bx,
-        oa.insert.by,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
-      const [pxb, pzb] = transformPoint(
-        ob.insert.bx,
-        ob.insert.by,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
+      const lvl = flatWallPieces[wa]!.levelIndex
+      const [pxa, pza] = tpScene(oa.insert.bx, oa.insert.by, lvl, opts)
+      const [pxb, pzb] = tpScene(ob.insert.bx, ob.insert.by, lvl, opts)
       if (Math.hypot(pxa - pxb, pza - pzb) > CLUSTER_CORNER_ATTACH_M) {
         continue
       }
@@ -467,15 +363,7 @@ function fixCornerAttachClusters(
 function fixParallelFacadeAttachClusters(
   out: OpeningResolved[],
   flatWallPieces: WallPieceForOpenings[],
-  opts: {
-    ox: number
-    oy: number
-    scale: number
-    offset: boolean
-    flipX: boolean
-    flipY: boolean
-    unitToMeters: number
-  },
+  opts: OpeningTransformOpts & { unitToMeters: number },
 ): void {
   const attachIdx = out
     .map((o, i) => (o.mode === 'attach' ? i : -1))
@@ -483,26 +371,9 @@ function fixParallelFacadeAttachClusters(
 
   const segmentTheta = (wi: number): number => {
     const s = flatWallPieces[wi]!.seg
-    const [sx, sy] = transformPoint(
-      s.x0,
-      s.y0,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [ex, ey] = transformPoint(
-      s.x1,
-      s.y1,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const li = flatWallPieces[wi]!.levelIndex
+    const [sx, sy] = tpScene(s.x0, s.y0, li, opts)
+    const [ex, ey] = tpScene(s.x1, s.y1, li, opts)
     return Math.atan2(ey - sy, ex - sx)
   }
 
@@ -511,26 +382,9 @@ function fixParallelFacadeAttachClusters(
 
   const segmentLenScene = (wi: number): number => {
     const s = flatWallPieces[wi]!.seg
-    const [sx, sy] = transformPoint(
-      s.x0,
-      s.y0,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [ex, ey] = transformPoint(
-      s.x1,
-      s.y1,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const li = flatWallPieces[wi]!.levelIndex
+    const [sx, sy] = tpScene(s.x0, s.y0, li, opts)
+    const [ex, ey] = tpScene(s.x1, s.y1, li, opts)
     return Math.hypot(ex - sx, ey - sy)
   }
 
@@ -540,36 +394,10 @@ function fixParallelFacadeAttachClusters(
     widthM: number,
   ): number => {
     const s = flatWallPieces[wi]!.seg
-    const [sx, sy] = transformPoint(
-      s.x0,
-      s.y0,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [ex, ey] = transformPoint(
-      s.x1,
-      s.y1,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [px, pz] = transformPoint(
-      ins.bx,
-      ins.by,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const li = flatWallPieces[wi]!.levelIndex
+    const [sx, sy] = tpScene(s.x0, s.y0, li, opts)
+    const [ex, ey] = tpScene(s.x1, s.y1, li, opts)
+    const [px, pz] = tpScene(ins.bx, ins.by, li, opts)
     const dx = ex - sx
     const dy = ey - sy
     const L = Math.hypot(dx, dy)
@@ -592,30 +420,16 @@ function fixParallelFacadeAttachClusters(
       }
       const wa = oa.wallIndex
       const wb = ob.wallIndex
+      if (flatWallPieces[wa]!.levelIndex !== flatWallPieces[wb]!.levelIndex) {
+        continue
+      }
       if (!parallelWalls(wa, wb)) {
         continue
       }
 
-      const [pxa, pza] = transformPoint(
-        oa.insert.bx,
-        oa.insert.by,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
-      const [pxb, pzb] = transformPoint(
-        ob.insert.bx,
-        ob.insert.by,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
+      const lvl = flatWallPieces[wa]!.levelIndex
+      const [pxa, pza] = tpScene(oa.insert.bx, oa.insert.by, lvl, opts)
+      const [pxb, pzb] = tpScene(ob.insert.bx, ob.insert.by, lvl, opts)
       if (Math.hypot(pxa - pxb, pza - pzb) > CLUSTER_PARALLEL_FACADE_ATTACH_M) {
         continue
       }
@@ -696,61 +510,45 @@ export function matchOpeningsToWalls(
     layerMapping: ParsedDxfLayerMappingFile | null
     unitToMeters: number
     defaultWallThicknessM: number
+    /** 若未传，使用 `layerMapping.floorPlan` */
+    floorPlan?: DxfFloorPlan | null
   },
 ): OpeningResolved[] {
   const candidates = filterOpeningInserts(inserts, opts.layerMapping)
   const out: OpeningResolved[] = []
+  const fp = opts.floorPlan ?? opts.layerMapping?.floorPlan ?? null
+
+  const baseOpts: OpeningTransformOpts = {
+    ox: opts.ox,
+    oy: opts.oy,
+    scale: opts.scale,
+    offset: opts.offset,
+    flipX: opts.flipX,
+    flipY: opts.flipY,
+    floorPlan: fp,
+  }
 
   for (const ins of candidates) {
     const kind = classifyOpeningBlock(ins.blockName)
     if (!kind) {
       continue
     }
+    const insLevel = resolveLevelIndexForDxfRawPoint(ins.bx, ins.by, fp)
     const widthM = openingWidthMetersFromInsert(ins.sx, ins.sy, opts.unitToMeters)
-    const [px, pz] = transformPoint(
-      ins.bx,
-      ins.by,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const [px, pz] = tpScene(ins.bx, ins.by, insLevel, baseOpts)
 
-    const rotOpts: OpeningTransformOpts = {
-      ox: opts.ox,
-      oy: opts.oy,
-      scale: opts.scale,
-      offset: opts.offset,
-      flipX: opts.flipX,
-      flipY: opts.flipY,
-    }
-    const rScene = dxfInsertSceneRotationRad(ins, rotOpts)
+    const rScene = dxfInsertSceneRotationRad(ins, baseOpts)
 
     let bestInterior: { wi: number; distLine: number; tParam: number; len: number; score: number } | null = null
     for (let wi = 0; wi < flatWallPieces.length; wi++) {
-      const s = flatWallPieces[wi]!.seg
-      const [sx, sy] = transformPoint(
-        s.x0,
-        s.y0,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
-      const [ex, ey] = transformPoint(
-        s.x1,
-        s.y1,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
+      const wp = flatWallPieces[wi]!
+      if (wp.levelIndex !== insLevel) {
+        continue
+      }
+      const s = wp.seg
+      const li = wp.levelIndex
+      const [sx, sy] = tpScene(s.x0, s.y0, li, baseOpts)
+      const [ex, ey] = tpScene(s.x1, s.y1, li, baseOpts)
       const { tParam, len } = pointToFiniteSegment(px, pz, sx, sy, ex, ey)
       if (len < 1e-6) {
         continue
@@ -783,27 +581,14 @@ export function matchOpeningsToWalls(
     } else {
       let bestNear: { wi: number; dist: number; tClamped: number; len: number; score: number } | null = null
       for (let wi = 0; wi < flatWallPieces.length; wi++) {
-        const s = flatWallPieces[wi]!.seg
-        const [sx, sy] = transformPoint(
-          s.x0,
-          s.y0,
-          opts.ox,
-          opts.oy,
-          opts.scale,
-          opts.offset,
-          opts.flipX,
-          opts.flipY,
-        )
-        const [ex, ey] = transformPoint(
-          s.x1,
-          s.y1,
-          opts.ox,
-          opts.oy,
-          opts.scale,
-          opts.offset,
-          opts.flipX,
-          opts.flipY,
-        )
+        const wp = flatWallPieces[wi]!
+        if (wp.levelIndex !== insLevel) {
+          continue
+        }
+        const s = wp.seg
+        const li = wp.levelIndex
+        const [sx, sy] = tpScene(s.x0, s.y0, li, baseOpts)
+        const [ex, ey] = tpScene(s.x1, s.y1, li, baseOpts)
         const { dist, tClamped, len } = pointToFiniteSegment(px, pz, sx, sy, ex, ey)
         if (len < 1e-6) {
           continue
@@ -858,27 +643,14 @@ export function matchOpeningsToWalls(
     const uz = Math.sin(rScene)
 
     for (let wi = 0; wi < flatWallPieces.length; wi++) {
-      const s = flatWallPieces[wi]!.seg
-      const [sx, sy] = transformPoint(
-        s.x0,
-        s.y0,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
-      const [ex, ey] = transformPoint(
-        s.x1,
-        s.y1,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
+      const wp = flatWallPieces[wi]!
+      if (wp.levelIndex !== insLevel) {
+        continue
+      }
+      const s = wp.seg
+      const li = wp.levelIndex
+      const [sx, sy] = tpScene(s.x0, s.y0, li, baseOpts)
+      const [ex, ey] = tpScene(s.x1, s.y1, li, baseOpts)
       const { dist, len } = pointToFiniteSegment(px, pz, sx, sy, ex, ey)
       if (len < 1e-6) {
         continue
@@ -913,12 +685,12 @@ export function matchOpeningsToWalls(
       continue
     }
 
-    const ref = flatWallPieces[0]
+    const ref = flatWallPieces.find((w) => w.levelIndex === insLevel) ?? flatWallPieces[0]
     out.push({
       mode: 'synthetic',
       kind,
       widthM,
-      levelIndex: 0,
+      levelIndex: insLevel,
       thicknessM: opts.defaultWallThicknessM,
       layer: ref?.seg.layer ?? '0',
       mapping: ref?.mapping ?? resolveLayerMapping('A-WALL', opts.layerMapping?.map ?? null),
@@ -930,53 +702,19 @@ export function matchOpeningsToWalls(
   }
 
   fixCornerAttachClusters(out, flatWallPieces, {
-    ox: opts.ox,
-    oy: opts.oy,
-    scale: opts.scale,
-    offset: opts.offset,
-    flipX: opts.flipX,
-    flipY: opts.flipY,
+    ...baseOpts,
     unitToMeters: opts.unitToMeters,
   })
 
   fixParallelFacadeAttachClusters(out, flatWallPieces, {
-    ox: opts.ox,
-    oy: opts.oy,
-    scale: opts.scale,
-    offset: opts.offset,
-    flipX: opts.flipX,
-    flipY: opts.flipY,
+    ...baseOpts,
     unitToMeters: opts.unitToMeters,
   })
 
   const attachOnly = out.filter((r): r is OpeningAttach => r.mode === 'attach')
-  extendWallPiecesForAttachmentOpenings(flatWallPieces, attachOnly, {
-    ox: opts.ox,
-    oy: opts.oy,
-    scale: opts.scale,
-    offset: opts.offset,
-    flipX: opts.flipX,
-    flipY: opts.flipY,
-  })
+  extendWallPiecesForAttachmentOpenings(flatWallPieces, attachOnly, baseOpts)
 
   return out
-}
-
-function inverseTransformPoint(
-  mx: number,
-  my: number,
-  ox: number,
-  oy: number,
-  scale: number,
-  useOffset: boolean,
-  flipX: boolean,
-  flipY: boolean,
-): [number, number] {
-  let px = (flipX ? -mx : mx) / scale
-  let py = (flipY ? -my : my) / scale
-  const x = useOffset ? px + ox : px
-  const y = useOffset ? py + oy : py
-  return [x, y]
 }
 
 /**
@@ -999,26 +737,9 @@ export function extendWallPiecesForAttachmentOpenings(
     if (!wp || ops.length === 0) {
       continue
     }
-    const [sx, sy] = transformPoint(
-      wp.seg.x0,
-      wp.seg.y0,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
-    const [ex, ey] = transformPoint(
-      wp.seg.x1,
-      wp.seg.y1,
-      opts.ox,
-      opts.oy,
-      opts.scale,
-      opts.offset,
-      opts.flipX,
-      opts.flipY,
-    )
+    const li = wp.levelIndex
+    const [sx, sy] = tpScene(wp.seg.x0, wp.seg.y0, li, opts)
+    const [ex, ey] = tpScene(wp.seg.x1, wp.seg.y1, li, opts)
     const dx = ex - sx
     const dy = ey - sy
     const L = Math.hypot(dx, dy)
@@ -1032,16 +753,7 @@ export function extendWallPiecesForAttachmentOpenings(
     let maxOpen = Number.NEGATIVE_INFINITY
     for (const op of ops) {
       const ins = op.insert
-      const [px, pz] = transformPoint(
-        ins.bx,
-        ins.by,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
+      const [px, pz] = tpScene(ins.bx, ins.by, li, opts)
       const t = (px - sx) * ux + (pz - sy) * uy
       const half = op.widthM / 2
       minOpen = Math.min(minOpen, t - half)
@@ -1058,8 +770,30 @@ export function extendWallPiecesForAttachmentOpenings(
     const syp = sy + t0 * uy
     const exp = sx + t1 * ux
     const eyp = sy + t1 * uy
-    const [x0, y0] = inverseTransformPoint(sxp, syp, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
-    const [x1, y1] = inverseTransformPoint(exp, eyp, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [x0, y0] = inverseTransformDxfPointForLevel(
+      sxp,
+      syp,
+      li,
+      opts.floorPlan ?? null,
+      opts.ox,
+      opts.oy,
+      opts.scale,
+      opts.offset,
+      opts.flipX,
+      opts.flipY,
+    )
+    const [x1, y1] = inverseTransformDxfPointForLevel(
+      exp,
+      eyp,
+      li,
+      opts.floorPlan ?? null,
+      opts.ox,
+      opts.oy,
+      opts.scale,
+      opts.offset,
+      opts.flipX,
+      opts.flipY,
+    )
     wp.seg.x0 = x0
     wp.seg.y0 = y0
     wp.seg.x1 = x1
@@ -1068,16 +802,7 @@ export function extendWallPiecesForAttachmentOpenings(
     const newL = t1 - t0
     for (const op of ops) {
       const ins = op.insert
-      const [px, pz] = transformPoint(
-        ins.bx,
-        ins.by,
-        opts.ox,
-        opts.oy,
-        opts.scale,
-        opts.offset,
-        opts.flipX,
-        opts.flipY,
-      )
+      const [px, pz] = tpScene(ins.bx, ins.by, li, opts)
       const tAlong = (px - sxp) * ux + (pz - syp) * uy
       const tNorm = newL > 1e-12 ? tAlong / newL : 0.5
       op.localX = clampedLocalXOpening(newL, op.widthM, Math.max(0, Math.min(1, tNorm)))

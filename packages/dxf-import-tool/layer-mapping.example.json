@@ -1,6 +1,15 @@
 {
   "version": 1,
   "description": "与 LAYERS.md §5 对照的示例；键为规范层名（也可写 xref 全名）。未列出的图层仍走 mapDxfLayerToPascal 内置规则。",
+  "layerAnalysis": "（可选，字符串）Agent 对图层表与楼层的自然语言综述，仅供人类阅读；程序不解析。",
+  "floorPlan": {
+    "schemaVersion": 1,
+    "note": "可选。描述多楼层在 DXF 中的分带，供后续导入器使用。当前 dxf-to-scene 仅消费 layers，不读取 floorPlan。",
+    "levelCount": 0,
+    "splitAxis": "y",
+    "coordinateSpace": "dxf_raw",
+    "levels": []
+  },
   "layers": {
     "A-WALL": { "target": { "kind": "wall" }, "confidence": "high" },
     "WALL": { "target": { "kind": "wall" }, "confidence": "high" },

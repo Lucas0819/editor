@@ -19,3 +19,14 @@ bun run src/dxf-to-scene.ts \
   --merge-double-wall-lines \
   --max-walls 8000
 ```
+
+### 多楼层测试文件转换
+
+``` shell
+bun run src/dxf-to-scene.ts \
+  --input "/Volumes/Ti600/Workspace/DEMO/Lucas/editor/Drawing5.dxf" \
+  --out "/Volumes/Ti600/Workspace/DEMO/Lucas/editor/apps/editor/public/demos/example.json" \
+  --mapping-file layer-mapping.Drawing5.json \
+  --merge-double-wall-lines \
+  --max-walls 8000
+```
