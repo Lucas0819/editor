@@ -5,6 +5,8 @@
  * `dxf-to-scene` 按 `target.kind` 生成对应 Pascal 节点（`wall` / `window` / `door` / `item` / `zone` / `slab` / `roof`）；`skip` 与 `annotation` 不生成实体。
  */
 
+import type { PlanInsert, PlanSegment } from './parse-dxf-entities.ts'
+
 /** 与编辑器 `CatalogCategory`（{@link packages/editor/src/store/use-editor.tsx}）对齐，避免 dxf 包依赖 editor */
 export type ItemCatalogCategoryHint =
   | 'furniture'
@@ -313,7 +315,81 @@ export function resolveLevelIndexForDxfRawSegment(
 }
 
 /**
- * DXF 原始坐标 + 楼层锚点（减去该层 `yMin` / `xMin`）→ 再按 EXTMIN 与比例变换到场景平面（墙 start/end 所用系）。
+ * 按每层**墙线**（图层映射为 `wall`，含柱块边线）在分割轴上的最小值作为锚点，使各层在轴上对齐。
+ * 若把标注、图框、长辅助线等所有 LINE 都算进去，极端端点会拉歪锚点，导致整层错位。
+ * 柱块已展开为线段，无需再扫 INSERT。
+ * 无墙线样本的层仍回退到 `floorPlan.levels[].range` 的 yMin/xMin。
+ */
+export function computePerLevelSplitAxisAnchorFromGeometry(
+  floorPlan: DxfFloorPlan | null,
+  segments: PlanSegment[],
+  _inserts: PlanInsert[],
+  layerMap: Map<string, DxfLayerMapping> | null,
+): Map<number, number> | null {
+  if (!floorPlan || floorPlan.levels.length === 0) {
+    return null
+  }
+  const minAxis = new Map<number, number>()
+  const INF = Number.POSITIVE_INFINITY
+
+  const consider = (levelIndex: number, ax: number, ay: number) => {
+    const v = floorPlan.splitAxis === 'y' ? ay : ax
+    const cur = minAxis.get(levelIndex) ?? INF
+    if (v < cur) {
+      minAxis.set(levelIndex, v)
+    }
+  }
+
+  for (const s of segments) {
+    const m = resolveLayerMapping(s.layer, layerMap)
+    if (m.target.kind !== 'wall') {
+      continue
+    }
+    const li = resolveLevelIndexForDxfRawSegment(s.x0, s.y0, s.x1, s.y1, floorPlan)
+    consider(li, s.x0, s.y0)
+    consider(li, s.x1, s.y1)
+  }
+
+  for (const L of floorPlan.levels) {
+    if (minAxis.has(L.levelIndex)) {
+      continue
+    }
+    const r = L.range
+    if (floorPlan.splitAxis === 'y' && 'yMin' in r && r.yMin != null) {
+      minAxis.set(L.levelIndex, r.yMin)
+    } else if (floorPlan.splitAxis === 'x' && 'xMin' in r && r.xMin != null) {
+      minAxis.set(L.levelIndex, r.xMin)
+    }
+  }
+
+  return minAxis
+}
+
+function splitAxisAnchorForLevel(
+  levelIndex: number,
+  floorPlan: DxfFloorPlan | null,
+  perLevelAnchor: Map<number, number> | null | undefined,
+): number | null {
+  if (!floorPlan) {
+    return null
+  }
+  if (perLevelAnchor?.has(levelIndex)) {
+    return perLevelAnchor.get(levelIndex)!
+  }
+  const entry = floorPlan.levels.find((l) => l.levelIndex === levelIndex)
+  const r = entry?.range
+  if (floorPlan.splitAxis === 'y' && r && 'yMin' in r && r.yMin != null) {
+    return r.yMin
+  }
+  if (floorPlan.splitAxis === 'x' && r && 'xMin' in r && r.xMin != null) {
+    return r.xMin
+  }
+  return null
+}
+
+/**
+ * DXF 原始坐标 + 楼层锚点（减去该层分割轴锚点）→ 再按 EXTMIN 与比例变换到场景平面（墙 start/end 所用系）。
+ * `perLevelAnchor` 由 `computePerLevelSplitAxisAnchorFromGeometry` 得到时，各层在分割轴上与内容对齐。
  */
 export function transformDxfPointForLevel(
   x: number,
@@ -326,17 +402,17 @@ export function transformDxfPointForLevel(
   useOffset: boolean,
   flipX: boolean,
   flipY: boolean,
+  perLevelAnchor?: Map<number, number> | null,
 ): [number, number] {
   let px = x
   let py = y
   if (floorPlan) {
-    const entry = floorPlan.levels.find((l) => l.levelIndex === levelIndex)
-    if (entry) {
-      const r = entry.range
-      if (floorPlan.splitAxis === 'y' && 'yMin' in r && r.yMin != null) {
-        py = y - r.yMin
-      } else if (floorPlan.splitAxis === 'x' && 'xMin' in r && r.xMin != null) {
-        px = x - r.xMin
+    const anchor = splitAxisAnchorForLevel(levelIndex, floorPlan, perLevelAnchor)
+    if (anchor !== null) {
+      if (floorPlan.splitAxis === 'y') {
+        py = y - anchor
+      } else {
+        px = x - anchor
       }
     }
   }
@@ -361,6 +437,7 @@ export function inverseTransformDxfPointForLevel(
   useOffset: boolean,
   flipX: boolean,
   flipY: boolean,
+  perLevelAnchor?: Map<number, number> | null,
 ): [number, number] {
   let mxx = mx
   let myy = my
@@ -371,13 +448,12 @@ export function inverseTransformDxfPointForLevel(
   let x = useOffset ? px + ox : px
   let y = useOffset ? py + oy : py
   if (floorPlan) {
-    const entry = floorPlan.levels.find((l) => l.levelIndex === levelIndex)
-    if (entry) {
-      const r = entry.range
-      if (floorPlan.splitAxis === 'y' && 'yMin' in r && r.yMin != null) {
-        y = y + r.yMin
-      } else if (floorPlan.splitAxis === 'x' && 'xMin' in r && r.xMin != null) {
-        x = x + r.xMin
+    const anchor = splitAxisAnchorForLevel(levelIndex, floorPlan, perLevelAnchor)
+    if (anchor !== null) {
+      if (floorPlan.splitAxis === 'y') {
+        y = y + anchor
+      } else {
+        x = x + anchor
       }
     }
   }

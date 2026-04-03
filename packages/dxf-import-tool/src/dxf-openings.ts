@@ -145,6 +145,8 @@ export type OpeningTransformOpts = {
   flipX: boolean
   flipY: boolean
   floorPlan?: DxfFloorPlan | null
+  /** 与 `computePerLevelSplitAxisAnchorFromGeometry` 一致，多楼层平面轴对齐 */
+  perLevelAnchor?: Map<number, number> | null
 }
 
 function tpScene(x: number, y: number, levelIndex: number, opts: OpeningTransformOpts): [number, number] {
@@ -159,6 +161,7 @@ function tpScene(x: number, y: number, levelIndex: number, opts: OpeningTransfor
     opts.offset,
     opts.flipX,
     opts.flipY,
+    opts.perLevelAnchor ?? null,
   )
 }
 
@@ -512,6 +515,7 @@ export function matchOpeningsToWalls(
     defaultWallThicknessM: number
     /** 若未传，使用 `layerMapping.floorPlan` */
     floorPlan?: DxfFloorPlan | null
+    perLevelAnchor?: Map<number, number> | null
   },
 ): OpeningResolved[] {
   const candidates = filterOpeningInserts(inserts, opts.layerMapping)
@@ -526,6 +530,7 @@ export function matchOpeningsToWalls(
     flipX: opts.flipX,
     flipY: opts.flipY,
     floorPlan: fp,
+    perLevelAnchor: opts.perLevelAnchor ?? null,
   }
 
   for (const ins of candidates) {
@@ -781,6 +786,7 @@ export function extendWallPiecesForAttachmentOpenings(
       opts.offset,
       opts.flipX,
       opts.flipY,
+      opts.perLevelAnchor ?? null,
     )
     const [x1, y1] = inverseTransformDxfPointForLevel(
       exp,
@@ -793,6 +799,7 @@ export function extendWallPiecesForAttachmentOpenings(
       opts.offset,
       opts.flipX,
       opts.flipY,
+      opts.perLevelAnchor ?? null,
     )
     wp.seg.x0 = x0
     wp.seg.y0 = y0

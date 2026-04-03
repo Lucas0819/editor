@@ -26,6 +26,7 @@ import {
   parseDxfPlanSegments,
 } from './parse-dxf-entities.ts'
 import {
+  computePerLevelSplitAxisAnchorFromGeometry,
   parseDxfLayerMappingFileJson,
   resolveLayerMapping,
   resolveLevelIndexForDxfRawSegment,
@@ -186,6 +187,7 @@ function segmentLengthM(
   flipY: boolean,
   floorPlan: DxfFloorPlan | null,
   levelIndex: number,
+  perLevelAnchor: Map<number, number> | null,
 ): number {
   const [x0, y0] = transformDxfPointForLevel(
     s.x0,
@@ -198,6 +200,7 @@ function segmentLengthM(
     useOffset,
     flipX,
     flipY,
+    perLevelAnchor,
   )
   const [x1, y1] = transformDxfPointForLevel(
     s.x1,
@@ -210,6 +213,7 @@ function segmentLengthM(
     useOffset,
     flipX,
     flipY,
+    perLevelAnchor,
   )
   const dx = x1 - x0
   const dy = y1 - y0
@@ -236,6 +240,7 @@ function bboxFromSegments(
   flipX: boolean,
   flipY: boolean,
   floorPlan: DxfFloorPlan | null,
+  perLevelAnchor: Map<number, number> | null,
 ): { minX: number; maxX: number; minY: number; maxY: number } | null {
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
@@ -244,8 +249,8 @@ function bboxFromSegments(
   for (const s of segments) {
     const li = resolveLevelIndexForDxfRawSegment(s.x0, s.y0, s.x1, s.y1, floorPlan)
     for (const [x, y] of [
-      transformDxfPointForLevel(s.x0, s.y0, li, floorPlan, ox, oy, scale, useOffset, flipX, flipY),
-      transformDxfPointForLevel(s.x1, s.y1, li, floorPlan, ox, oy, scale, useOffset, flipX, flipY),
+      transformDxfPointForLevel(s.x0, s.y0, li, floorPlan, ox, oy, scale, useOffset, flipX, flipY, perLevelAnchor),
+      transformDxfPointForLevel(s.x1, s.y1, li, floorPlan, ox, oy, scale, useOffset, flipX, flipY, perLevelAnchor),
     ]) {
       minX = Math.min(minX, x)
       maxX = Math.max(maxX, x)
@@ -282,12 +287,15 @@ function buildSceneGraph(
     doubleWallMinLengthRatio: number
     /** 门窗 INSERT（WIN2D / DorLib 等）；与墙段关联后写入墙 children，否则生成短墙 */
     inserts: PlanInsert[]
+    /** 各层分割轴锚点（与 `computePerLevelSplitAxisAnchorFromGeometry`） */
+    perLevelAnchor: Map<number, number> | null
   },
 ): SceneGraph {
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
   const ox = header.extMin.x
   const oy = header.extMin.y
   const fp = opts.layerMapping?.floorPlan ?? null
+  const pl = opts.perLevelAnchor
 
   type Tagged = { seg: PlanSegment; levelIndex: number; mapping: DxfLayerMapping }
   const tagged: Tagged[] = []
@@ -304,7 +312,7 @@ function buildSceneGraph(
       continue
     }
     const levelIndex = resolveLevelIndexForDxfRawSegment(s.x0, s.y0, s.x1, s.y1, fp)
-    const lenM = segmentLengthM(s, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, levelIndex)
+    const lenM = segmentLengthM(s, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, levelIndex, pl)
     if (lenM < opts.minLenM) {
       continue
     }
@@ -402,7 +410,7 @@ function buildSceneGraph(
       const t = Math.min(Math.max(w.seg.columnThicknessM, opts.wallThickness), columnOutlineThicknessCapM)
       return { ...w, thicknessM: t }
     }
-    const lenM = segmentLengthM(w.seg, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, w.levelIndex)
+    const lenM = segmentLengthM(w.seg, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, w.levelIndex, pl)
     const t = Math.min(Math.max(lenM, opts.wallThickness), columnOutlineThicknessCapM)
     return { ...w, thicknessM: t }
   })
@@ -421,7 +429,7 @@ function buildSceneGraph(
     byLevel.set(0, [])
   }
 
-  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp)
+  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, pl)
   const margin = 2
   const polygon =
     bb === null
@@ -518,6 +526,7 @@ function buildSceneGraph(
           unitToMeters: scale,
           defaultWallThicknessM: opts.wallThickness,
           floorPlan: fp,
+          perLevelAnchor: pl,
         })
       : []
 
@@ -584,6 +593,7 @@ function buildSceneGraph(
         opts.offset,
         opts.flipX,
         opts.flipY,
+        pl,
       )
       const [ex, ey] = transformDxfPointForLevel(
         s.x1,
@@ -596,6 +606,7 @@ function buildSceneGraph(
         opts.offset,
         opts.flipX,
         opts.flipY,
+        pl,
       )
       const wid = nid('wall')
       wallIds.push(wid)
@@ -841,6 +852,12 @@ async function main() {
     args.offset,
     args.axisSnapToleranceM,
   )
+  const perLevelAnchor = computePerLevelSplitAxisAnchorFromGeometry(
+    layerMapping?.floorPlan ?? null,
+    segments,
+    inserts,
+    layerMapping?.map ?? null,
+  )
   console.error(
     `INSUNITS=${header.insUnits} → scale ${scale} m/unit, EXTMIN (${header.extMin.x}, ${header.extMin.y})`,
   )
@@ -870,6 +887,7 @@ async function main() {
     doubleWallMinOverlapM: args.doubleWallMinOverlapM,
     doubleWallMinLengthRatio: args.doubleWallMinLengthRatio,
     inserts,
+    perLevelAnchor,
   })
 
   const wallCount = Object.keys(scene.nodes).filter(
