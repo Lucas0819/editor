@@ -547,6 +547,93 @@ function buildSceneGraph(
     }
   }
 
+  /** 单层：墙段与合成短墙端点在平面上的包围盒，用于生成该层整块楼板（轴对齐矩形）。 */
+  function bboxForLevelWallEndpoints(
+    li: number,
+    pieces: WallPiece[],
+    synthetics: OpeningSynthetic[],
+  ): { minX: number; maxX: number; minY: number; maxY: number } | null {
+    let minX = Number.POSITIVE_INFINITY
+    let maxX = Number.NEGATIVE_INFINITY
+    let minY = Number.POSITIVE_INFINITY
+    let maxY = Number.NEGATIVE_INFINITY
+    const expand = (x: number, y: number) => {
+      minX = Math.min(minX, x)
+      maxX = Math.max(maxX, x)
+      minY = Math.min(minY, y)
+      maxY = Math.max(maxY, y)
+    }
+    for (const w of pieces) {
+      const s = w.seg
+      for (const [x, y] of [
+        transformDxfPointForLevel(
+          s.x0,
+          s.y0,
+          li,
+          fp,
+          ox,
+          oy,
+          scale,
+          opts.offset,
+          opts.flipX,
+          opts.flipY,
+          pl,
+        ),
+        transformDxfPointForLevel(
+          s.x1,
+          s.y1,
+          li,
+          fp,
+          ox,
+          oy,
+          scale,
+          opts.offset,
+          opts.flipX,
+          opts.flipY,
+          pl,
+        ),
+      ]) {
+        expand(x, y)
+      }
+    }
+    for (const syn of synthetics) {
+      expand(syn.start[0], syn.start[1])
+      expand(syn.end[0], syn.end[1])
+    }
+    if (!Number.isFinite(minX)) {
+      return null
+    }
+    return { minX, maxX, minY, maxY }
+  }
+
+  /** polygon 为 [x,z]；与墙 start/end 同一平面。略扩边以覆盖墙厚。 */
+  function slabRectangleFromWallBounds(
+    bb: { minX: number; maxX: number; minY: number; maxY: number },
+    padM: number,
+  ): Array<[number, number]> {
+    let minX = bb.minX - padM
+    let maxX = bb.maxX + padM
+    let minY = bb.minY - padM
+    let maxY = bb.maxY + padM
+    const minSpan = 0.05
+    if (maxX - minX < minSpan) {
+      const c = (minX + maxX) / 2
+      minX = c - minSpan / 2
+      maxX = c + minSpan / 2
+    }
+    if (maxY - minY < minSpan) {
+      const c = (minY + maxY) / 2
+      minY = c - minSpan / 2
+      maxY = c + minSpan / 2
+    }
+    return [
+      [minX, minY],
+      [maxX, minY],
+      [maxX, maxY],
+      [minX, maxY],
+    ]
+  }
+
   nodes[siteId] = {
     object: 'node',
     id: siteId,
@@ -580,6 +667,28 @@ function buildSceneGraph(
     const floorLabels = floorEntry?.labels
     const levelName = floorLabels?.[0] ?? `楼层 ${nameSeq.next()}`
     const segs = byLevel.get(li) ?? []
+    const slabSyn = syntheticByLevel.get(li) ?? []
+    const wallBBox = bboxForLevelWallEndpoints(li, segs, slabSyn)
+    const slabPadM = Math.max(0.05, opts.wallThickness * 0.5)
+    let slabId: string | null = null
+    if (wallBBox !== null) {
+      slabId = nid('slab')
+      const slabPolygon = slabRectangleFromWallBounds(wallBBox, slabPadM)
+      nodes[slabId] = {
+        object: 'node',
+        id: slabId,
+        type: 'slab',
+        name: `楼板 ${nameSeq.next()}`,
+        parentId: levelId,
+        visible: true,
+        metadata: {
+          ...(floorLabels?.length ? { dxfFloorLabels: floorLabels } : {}),
+          dxfSlabFromWallBounds: true,
+        },
+        polygon: slabPolygon,
+        elevation: 0.05,
+      }
+    }
     const wallIds: string[] = []
     for (const { seg: s, mapping, thicknessM, fromDoubleLineMerge } of segs) {
       const [sx, sy] = transformDxfPointForLevel(
@@ -771,7 +880,7 @@ function buildSceneGraph(
         dxfFloorPlanLevelIndex: li,
         ...(floorLabels?.length ? { dxfFloorLabels: floorLabels } : {}),
       },
-      children: wallIds,
+      children: slabId !== null ? [slabId, ...wallIds] : wallIds,
       level: li,
     }
   }
@@ -902,7 +1011,12 @@ async function main() {
   const levelCount = Object.keys(scene.nodes).filter(
     (id) => (scene.nodes[id] as { type?: string }).type === 'level',
   ).length
-  console.error(`Levels: ${levelCount}, walls: ${wallCount}, windows: ${windowCount}, doors: ${doorCount}`)
+  const slabCount = Object.keys(scene.nodes).filter(
+    (id) => (scene.nodes[id] as { type?: string }).type === 'slab',
+  ).length
+  console.error(
+    `Levels: ${levelCount}, slabs: ${slabCount}, walls: ${wallCount}, windows: ${windowCount}, doors: ${doorCount}`,
+  )
 
   const outPath = resolve(args.out)
   await mkdir(dirname(outPath), { recursive: true })
