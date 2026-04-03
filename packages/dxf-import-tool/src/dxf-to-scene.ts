@@ -14,11 +14,6 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import {
-  compileLayerRegex,
-  layerNameToLevelIndex,
-  type UnmatchedLayersMode,
-} from './layer-level.ts'
 import { snapPlanSegmentsToAxis } from './axis-snap.ts'
 import {
   columnInsertToSquareWallSegment,
@@ -77,11 +72,6 @@ function parseArgs(argv: string[]) {
   let wallThickness = 0.15
   let offset = true
   let scaleOverride: number | null = null
-  /** If set, split walls across multiple Level nodes by layer name (first regex capture = floor). */
-  let layerRegexSource: string | null = null
-  /** If true (default), capture 1 → Pascal level 0; if false, capture is already 0-based level index. */
-  let layerFloorOneBased = true
-  let unmatchedLayers: UnmatchedLayersMode = 'skip'
   /** 0 = disabled. Set explicitly to cap segment length (meters), e.g. to filter site bounds. */
   let maxSegmentLengthM = 0
   /**
@@ -121,20 +111,6 @@ function parseArgs(argv: string[]) {
       offset = false
     } else if (a === '--scale-to-meters') {
       scaleOverride = Number.parseFloat(argv[++i] ?? '') || null
-    } else if (a === '--layer-regex') {
-      const next = argv[i + 1]
-      if (next && !next.startsWith('-')) {
-        layerRegexSource = argv[++i] ?? ''
-      } else {
-        layerRegexSource = String.raw`图层\s*(\d+)`
-      }
-    } else if (a === '--layer-floor-zero-based') {
-      layerFloorOneBased = false
-    } else if (a === '--unmatched-layers') {
-      const v = argv[++i]
-      if (v === 'skip' || v === 'level0') {
-        unmatchedLayers = v
-      }
     } else if (a === '--max-segment-length-m') {
       const next = argv[i + 1]
       if (next && !next.startsWith('-')) {
@@ -184,9 +160,6 @@ function parseArgs(argv: string[]) {
     wallThickness,
     offset,
     scaleOverride,
-    layerRegexSource: layerRegexSource?.trim() || null,
-    layerFloorOneBased,
-    unmatchedLayers,
     maxSegmentLengthM,
     axisSnapToleranceM,
     flipX,
@@ -286,9 +259,6 @@ function buildSceneGraph(
     wallThickness: number
     offset: boolean
     scaleOverride: number | null
-    layerRegexSource: string | null
-    layerFloorOneBased: boolean
-    unmatchedLayers: UnmatchedLayersMode
     maxSegmentLengthM: number
     axisSnapToleranceM: number
     flipX: boolean
@@ -307,8 +277,6 @@ function buildSceneGraph(
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
   const ox = header.extMin.x
   const oy = header.extMin.y
-
-  const layerRegex = opts.layerRegexSource ? compileLayerRegex(opts.layerRegexSource) : null
 
   type Tagged = { seg: PlanSegment; levelIndex: number; mapping: DxfLayerMapping }
   const tagged: Tagged[] = []
@@ -333,17 +301,7 @@ function buildSceneGraph(
       continue
     }
 
-    let levelIndex = 0
-    if (layerRegex) {
-      let idx = layerNameToLevelIndex(s.layer, layerRegex, opts.layerFloorOneBased)
-      if (idx === null) {
-        if (opts.unmatchedLayers === 'skip') {
-          continue
-        }
-        idx = 0
-      }
-      levelIndex = idx
-    }
+    const levelIndex = 0
     tagged.push({ seg: s, levelIndex, mapping })
   }
 
@@ -492,11 +450,6 @@ function buildSceneGraph(
   }
   if (opts.layerMapping && opts.layerMapping.layerCount > 0) {
     siteMeta.layerMappingLayers = opts.layerMapping.layerCount
-  }
-  if (opts.layerRegexSource) {
-    siteMeta.layerRegex = opts.layerRegexSource
-    siteMeta.layerFloorOneBased = opts.layerFloorOneBased
-    siteMeta.unmatchedLayers = opts.unmatchedLayers
   }
   if (opts.maxSegmentLengthM > 0) {
     siteMeta.maxSegmentLengthM = opts.maxSegmentLengthM
@@ -774,7 +727,7 @@ function buildSceneGraph(
       visible: true,
       name: levelName,
       metadata: {
-        dxfLayerFloor: opts.layerFloorOneBased ? li + 1 : li,
+        dxfLayerFloor: li + 1,
       },
       children: wallIds,
       level: li,
@@ -875,9 +828,6 @@ async function main() {
     wallThickness: args.wallThickness,
     offset: args.offset,
     scaleOverride: args.scaleOverride,
-    layerRegexSource: args.layerRegexSource,
-    layerFloorOneBased: args.layerFloorOneBased,
-    unmatchedLayers: args.unmatchedLayers,
     maxSegmentLengthM: args.maxSegmentLengthM,
     axisSnapToleranceM: args.axisSnapToleranceM,
     flipX: args.flipX,

@@ -32,9 +32,6 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--wall-thickness` | 墙厚（米），默认 `0.15` |
 | `--no-offset` | 不使用 `$EXTMIN` 平移原点（默认会平移，减小坐标数值） |
 | `--scale-to-meters` | 手动指定「图纸单位 → 米」的乘数（覆盖 HEADER 里 `$INSUNITS` 的换算） |
-| `--layer-regex` | 按**图层名**拆成多个 `Level`。下一参数为正则字符串，**第一个捕获组**为楼层数字；若省略参数则默认 `图层\s*(\d+)`（匹配「图层 1」…「图层 7」） |
-| `--layer-floor-zero-based` | 与 `--layer-regex` 连用：捕获组表示 **0 起算的 level 序号**（默认是 **1 起算楼层**：`1`→`level` 字段 `0`） |
-| `--unmatched-layers` | `skip`（默认）：不匹配图层的线段丢弃；`level0`：归入第 0 层 |
 | `--axis-snap-tolerance-m` | 在**米制**下：纵向偏差小于容差则视为水平并拉直；横向同理视为垂直。默认 `0.0001`（0.1 mm）；传 `0` 关闭 |
 | `--flip-x` | 在米制坐标上对 **DXF X** 取反后再写入墙的 `start`/`end` 第一个分量（Pascal 世界 **X**）。**默认已启用**（不写参数也等价于翻转），与常见 CAD 顶视与编辑器透视下的左右关系一致 |
 | `--no-flip-x` | 关闭上述 X 翻转，与 DXF 原始 X 同号 |
@@ -46,7 +43,7 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--double-wall-max-spacing-m` | 最大间距（米），默认 `0.65`；超过则认为是两堵独立墙 |
 | `--double-wall-min-overlap-m` | 两线在墙方向上的投影重叠至少多长（米）才合并，默认 `0.04` |
 
-不传 `--layer-regex` 时仍为**单层**（所有墙在同一 `Level`）。
+当前导出为**单层**（所有墙在同一 `Level`，`level` 字段为 `0`）。
 
 **`--mapping-file` 格式**（`target` / `confidence` 与 `dxf-layer-mapping.ts` 中类型一致）：
 
@@ -99,7 +96,7 @@ location.reload()
 
 ## 图层与命名（转换匹配）
 
-- 从 DXF **图层表**读取名称、常见 **工程前缀 / `$` 分隔 / 专业前缀** 的说明，以及与本工具 `--layer-regex` 的对应关系，见同目录 **[LAYERS.md](./LAYERS.md)**。
+- 从 DXF **图层表**读取名称、常见 **工程前缀 / `$` 分隔 / 专业前缀** 的说明，见同目录 **[LAYERS.md](./LAYERS.md)**。
 - **图纸图层 ↔ Pascal 节点 / 物品 category** 的对应表与 **`mapDxfLayerToPascal()`**，见 [LAYERS.md](./LAYERS.md) 第 5 节与 `src/dxf-layer-mapping.ts`。
 
 ## 门窗（INSERT 块）

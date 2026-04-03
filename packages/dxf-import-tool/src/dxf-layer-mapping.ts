@@ -130,7 +130,7 @@ export function mapDxfLayerToPascal(
       map: { target: { kind: 'wall', variant: 'column_outline' }, confidence: 'medium' },
     },
     /**
-     * 纯数字楼层图层（与 OPERATIONS 默认 `--layer-regex`「图层\\s*(\\d+)」配套）：无专业 A-WALL 前缀时仍出墙线。
+     * 图层名形如「图层 1」…（仅作类型兜底）：无专业 A-WALL 前缀时仍出墙线。
      * 若某层混有非墙几何，需改用专业图层名或后续管线细分。
      */
     { when: (s) => /^图层\s*\d+$/.test(s.trim()), map: { target: { kind: 'wall' }, confidence: 'low' } },
