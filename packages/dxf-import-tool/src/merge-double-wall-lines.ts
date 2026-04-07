@@ -430,12 +430,17 @@ export function mergeDoubleWallLineSegments(
   return { merged: out, sourceSegmentsMerged, wallsReduced }
 }
 
-/** 水平/竖直墙段与轴线夹角小于此值时视为与轴平行（弧度） */
-const COLINEAR_AXIS_ALIGN_RAD = (2.5 * Math.PI) / 180
 /** 两段共线墙在轴向上的端点间隙 ≤ 此值（米）时合并（双线合并后门洞两侧常留 ~0.4–0.7m 缝；过大则会把整层同标高墙串成一条） */
-const COLINEAR_GAP_MERGE_MAX_M = 0.75
+export const DEFAULT_COLINEAR_GAP_MERGE_MAX_M = 0.75
 /** 两段墙平行于同一轴线时，法向偏移 ≤ 此值（米）才视为同一立面 */
-const COLINEAR_GAP_MERGE_PERP_TOL_M = 0.06
+export const DEFAULT_COLINEAR_GAP_MERGE_PERP_TOL_M = 0.06
+/**
+ * 分组键用的平面桶宽（米）。过小会把同一立面因双线合并/浮点漂移拆到不同组，无法链式合并；
+ * 键为 `round(coord / bucketM) * bucketM`，与旧版 0.01 一致；可用 CLI 加大（如 0.02–0.025）减少漂移拆组。
+ */
+export const DEFAULT_COLINEAR_GAP_MERGE_BUCKET_M = 0.01
+/** 与坐标轴夹角在此内视为横平竖直，参与水平/竖直合并；略放宽可把微斜墙纳入同一套链式合并 */
+export const DEFAULT_COLINEAR_GAP_AXIS_ALIGN_RAD = (2.5 * Math.PI) / 180
 
 /**
  * 双线合并后，同一楼层上「共线且端点之间有小间隙」的墙段再合并为一条中心线，
@@ -450,8 +455,25 @@ export function mergeColinearGapWallPieces(
     offset: boolean
     flipX: boolean
     flipY: boolean
+    /** 轴向端点间隙上限，默认 {@link DEFAULT_COLINEAR_GAP_MERGE_MAX_M} */
+    maxGapM?: number
+    /** 法向对齐容差，默认 {@link DEFAULT_COLINEAR_GAP_MERGE_PERP_TOL_M} */
+    perpTolM?: number
+    /** 水平 yMid / 竖直 xMid 分组桶宽，默认 {@link DEFAULT_COLINEAR_GAP_MERGE_BUCKET_M} */
+    bucketM?: number
+    /** 横平竖直判定半角（弧度），默认 {@link DEFAULT_COLINEAR_GAP_AXIS_ALIGN_RAD} */
+    axisAlignRad?: number
+    /** 对非横平竖直段做「同一无限长直线」上的区间合并（商场弧段等仍不会并） */
+    mergeGeneralDirection?: boolean
   },
 ): { merged: MergedWallSegment[]; piecesReduced: number } {
+  const maxGapM = opts.maxGapM ?? DEFAULT_COLINEAR_GAP_MERGE_MAX_M
+  const perpTolM = opts.perpTolM ?? DEFAULT_COLINEAR_GAP_MERGE_PERP_TOL_M
+  const bucketM = Math.max(1e-4, opts.bucketM ?? DEFAULT_COLINEAR_GAP_MERGE_BUCKET_M)
+  const axisAlignRad = opts.axisAlignRad ?? DEFAULT_COLINEAR_GAP_AXIS_ALIGN_RAD
+  const mergeGeneralDirection = opts.mergeGeneralDirection ?? false
+  const bucketCoord = (coord: number) => Math.round(coord / bucketM) * bucketM
+  const sinAxis = Math.sin(axisAlignRad)
   const isHorizontal = (s: PlanSegment): boolean | null => {
     const [sx, sy] = transformPoint(s.x0, s.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
     const [ex, ey] = transformPoint(s.x1, s.y1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
@@ -461,7 +483,7 @@ export function mergeColinearGapWallPieces(
     if (len < 1e-9) {
       return null
     }
-    return Math.abs(dy) / len <= Math.sin(COLINEAR_AXIS_ALIGN_RAD)
+    return Math.abs(dy) / len <= sinAxis
   }
 
   const isVertical = (s: PlanSegment): boolean | null => {
@@ -473,7 +495,7 @@ export function mergeColinearGapWallPieces(
     if (len < 1e-9) {
       return null
     }
-    return Math.abs(dx) / len <= Math.sin(COLINEAR_AXIS_ALIGN_RAD)
+    return Math.abs(dx) / len <= sinAxis
   }
 
   type Horiz = { w: MergedWallSegment; lo: number; hi: number; yMid: number }
@@ -559,7 +581,7 @@ export function mergeColinearGapWallPieces(
     if (a.w.levelIndex !== b.w.levelIndex || !sameLayer(a.w, b.w)) {
       return false
     }
-    if (Math.abs(a.yMid - b.yMid) > COLINEAR_GAP_MERGE_PERP_TOL_M) {
+    if (Math.abs(a.yMid - b.yMid) > perpTolM) {
       return false
     }
     const gap = Math.max(0, Math.max(a.lo, b.lo) - Math.min(a.hi, b.hi))
@@ -567,14 +589,14 @@ export function mergeColinearGapWallPieces(
     if (overlap > 1e-9) {
       return true
     }
-    return gap <= COLINEAR_GAP_MERGE_MAX_M + 1e-9
+    return gap <= maxGapM + 1e-9
   }
 
   const canMergeVert = (a: Vert, b: Vert): boolean => {
     if (a.w.levelIndex !== b.w.levelIndex || !sameLayer(a.w, b.w)) {
       return false
     }
-    if (Math.abs(a.xMid - b.xMid) > COLINEAR_GAP_MERGE_PERP_TOL_M) {
+    if (Math.abs(a.xMid - b.xMid) > perpTolM) {
       return false
     }
     const gap = Math.max(0, Math.max(a.lo, b.lo) - Math.min(a.hi, b.hi))
@@ -582,16 +604,15 @@ export function mergeColinearGapWallPieces(
     if (overlap > 1e-9) {
       return true
     }
-    return gap <= COLINEAR_GAP_MERGE_MAX_M + 1e-9
+    return gap <= maxGapM + 1e-9
   }
 
   let piecesReduced = 0
 
   /** 仅同标高、同图层的水平段才能链式合并；全局按 x 排序会被其它楼层的水平段打断 */
-  const yBucket = (y: number) => Math.round(y / 0.01) * 0.01
   const horizGroups = new Map<string, Horiz[]>()
   for (const h of horiz) {
-    const key = `${h.w.levelIndex}::${canonicalDxfLayerName(h.w.seg.layer)}::${yBucket(h.yMid)}`
+    const key = `${h.w.levelIndex}::${canonicalDxfLayerName(h.w.seg.layer)}::${bucketCoord(h.yMid)}`
     const list = horizGroups.get(key) ?? []
     list.push(h)
     horizGroups.set(key, list)
@@ -618,10 +639,9 @@ export function mergeColinearGapWallPieces(
     }
   }
 
-  const xBucket = (x: number) => Math.round(x / 0.01) * 0.01
   const vertGroups = new Map<string, Vert[]>()
   for (const v of vert) {
-    const key = `${v.w.levelIndex}::${canonicalDxfLayerName(v.w.seg.layer)}::${xBucket(v.xMid)}`
+    const key = `${v.w.levelIndex}::${canonicalDxfLayerName(v.w.seg.layer)}::${bucketCoord(v.xMid)}`
     const list = vertGroups.get(key) ?? []
     list.push(v)
     vertGroups.set(key, list)
@@ -648,21 +668,183 @@ export function mergeColinearGapWallPieces(
     }
   }
 
+  const restColumn: MergedWallSegment[] = []
+  const restGeneral: MergedWallSegment[] = []
+  for (const w of rest) {
+    if (w.mapping.target.kind === 'wall' && w.mapping.target.variant === 'column_outline') {
+      restColumn.push(w)
+    } else {
+      restGeneral.push(w)
+    }
+  }
+
+  let mergedGeneralOut: MergedWallSegment[] = restGeneral
+  if (mergeGeneralDirection && restGeneral.length > 0) {
+    const sinEpsGen = Math.sin(0.004)
+    const angleStep = (2 * Math.PI) / 180
+    const dStep = Math.max(0.02, perpTolM * 0.5)
+
+    type Gen = {
+      w: MergedWallSegment
+      ux: number
+      uy: number
+      nx: number
+      ny: number
+      d: number
+      lo: number
+      hi: number
+    }
+
+    const toGen = (w: MergedWallSegment): Gen | null => {
+      const [sx, sy] = transformPoint(w.seg.x0, w.seg.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+      const [ex, ey] = transformPoint(w.seg.x1, w.seg.y1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+      const dx = ex - sx
+      const dy = ey - sy
+      const len = Math.hypot(dx, dy)
+      if (len < 1e-9) {
+        return null
+      }
+      let ux = dx / len
+      let uy = dy / len
+      if (ux < -1e-9 || (Math.abs(ux) <= 1e-9 && uy < -1e-9)) {
+        ux = -ux
+        uy = -uy
+      }
+      const nx = -uy
+      const ny = ux
+      const d = nx * sx + ny * sy
+      const lo = Math.min(sx * ux + sy * uy, ex * ux + ey * uy)
+      const hi = Math.max(sx * ux + sy * uy, ex * ux + ey * uy)
+      return { w, ux, uy, nx, ny, d, lo, hi }
+    }
+
+    const mergeGenPair = (a: Gen, b: Gen): Gen => {
+      const d = (a.d + b.d) / 2
+      const lo = Math.min(a.lo, b.lo)
+      const hi = Math.max(a.hi, b.hi)
+      const { nx, ny, ux, uy } = a
+      const mx0 = d * nx + lo * ux
+      const my0 = d * ny + lo * uy
+      const mx1 = d * nx + hi * ux
+      const my1 = d * ny + hi * uy
+      const [x0, y0] = inverseTransformPoint(mx0, my0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+      const [x1, y1] = inverseTransformPoint(mx1, my1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+      const seg: PlanSegment = { x0, y0, x1, y1, layer: a.w.seg.layer }
+      const mergedW: MergedWallSegment = {
+        seg,
+        levelIndex: a.w.levelIndex,
+        mapping: a.w.mapping,
+        thicknessM: Math.max(a.w.thicknessM, b.w.thicknessM),
+        fromDoubleLineMerge: a.w.fromDoubleLineMerge || b.w.fromDoubleLineMerge,
+      }
+      const g = toGen(mergedW)
+      return g ?? { w: mergedW, ux, uy, nx, ny, d, lo, hi }
+    }
+
+    const canMergeGen = (a: Gen, b: Gen): boolean => {
+      if (a.w.levelIndex !== b.w.levelIndex || !sameLayer(a.w, b.w)) {
+        return false
+      }
+      if (Math.abs(a.d - b.d) > perpTolM) {
+        return false
+      }
+      if (Math.abs(a.ux * b.uy - a.uy * b.ux) > sinEpsGen) {
+        return false
+      }
+      const gap = Math.max(0, Math.max(a.lo, b.lo) - Math.min(a.hi, b.hi))
+      const overlap = Math.min(a.hi, b.hi) - Math.max(a.lo, b.lo)
+      if (overlap > 1e-9) {
+        return true
+      }
+      return gap <= maxGapM + 1e-9
+    }
+
+    const gens: Gen[] = []
+    for (const w of restGeneral) {
+      const g = toGen(w)
+      if (g) {
+        gens.push(g)
+      }
+    }
+
+    const genGroups = new Map<string, Gen[]>()
+    for (const g of gens) {
+      const ak = Math.round(Math.atan2(g.uy, g.ux) / angleStep)
+      const dk = Math.round(g.d / dStep)
+      const key = `${g.w.levelIndex}::${canonicalDxfLayerName(g.w.seg.layer)}::${ak}::${dk}`
+      const list = genGroups.get(key) ?? []
+      list.push(g)
+      genGroups.set(key, list)
+    }
+
+    const mergedGen: Gen[] = []
+    for (const group of genGroups.values()) {
+      group.sort((a, b) => a.lo - b.lo)
+      let i = 0
+      while (i < group.length) {
+        let cur = group[i]!
+        let j = i + 1
+        while (j < group.length) {
+          const next = group[j]!
+          if (canMergeGen(cur, next)) {
+            piecesReduced += 1
+            cur = mergeGenPair(cur, next)
+            j++
+          } else {
+            break
+          }
+        }
+        mergedGen.push(cur)
+        i = j
+      }
+    }
+
+    mergedGeneralOut = mergedGen.map((g) => g.w)
+  }
+
   const merged: MergedWallSegment[] = [
-    ...rest,
+    ...restColumn,
+    ...mergedGeneralOut,
     ...mergedHoriz.map((h) => h.w),
     ...mergedVert.map((v) => v.w),
   ]
   return { merged, piecesReduced }
 }
 
+/**
+ * 多轮共线缝合并：单轮链式合并后，新段可与下一轮邻居再并，减少横平竖直双线图中残留碎片。
+ */
+export function mergeColinearGapWallPiecesIterative(
+  pieces: MergedWallSegment[],
+  opts: Parameters<typeof mergeColinearGapWallPieces>[1] & {
+    /** 默认 20；设为 1 等价于单轮 */
+    maxPasses?: number
+  },
+): { merged: MergedWallSegment[]; piecesReduced: number; passes: number } {
+  const maxPasses = Math.max(1, Math.min(50, opts.maxPasses ?? 20))
+  const { maxPasses: _omit, ...gapOpts } = opts
+  let cur = pieces
+  let totalReduced = 0
+  let passes = 0
+  for (let p = 0; p < maxPasses; p++) {
+    passes = p + 1
+    const { merged, piecesReduced } = mergeColinearGapWallPieces(cur, gapOpts)
+    cur = merged
+    totalReduced += piecesReduced
+    if (piecesReduced === 0) {
+      break
+    }
+  }
+  return { merged: cur, piecesReduced: totalReduced, passes }
+}
+
 /** 双线合并 + 共线缝合并后，墙角处常剩极短肢（≈0.2–0.35m）与长立面近乎垂直，3D 上为重复体块 */
-const REDUNDANT_STUB_MAX_LEN_M = 0.4
-const REDUNDANT_STUB_LONG_MIN_LEN_M = 2.0
+export const DEFAULT_REDUNDANT_STUB_MAX_LEN_M = 0.4
+export const DEFAULT_REDUNDANT_STUB_LONG_MIN_LEN_M = 2.0
 /** 短肢与长墙方向点积 |cos| 小于此视为近乎垂直 */
-const REDUNDANT_STUB_PERP_DOT_MAX = 0.38
+export const DEFAULT_REDUNDANT_STUB_PERP_DOT_MAX = 0.38
 /** 短肢端点到长墙有限段的最近距离上限（米） */
-const REDUNDANT_STUB_TO_LONG_MAX_M = 0.18
+export const DEFAULT_REDUNDANT_STUB_TO_LONG_MAX_M = 0.18
 
 function distPointToFiniteSegment(
   px: number,
@@ -696,8 +878,20 @@ export function removeRedundantCornerStubs(
     offset: boolean
     flipX: boolean
     flipY: boolean
+    /** 视为可删短肢的最大长度（米） */
+    stubMaxLenM?: number
+    /** 「长墙」最短长度（米），短肢只相对这些长段判断 */
+    stubLongMinLenM?: number
+    /** |cos(夹角)| 上限，小于则视为与长墙近乎垂直 */
+    stubPerpDotMax?: number
+    /** 短肢端点到长墙段的距离上限（米） */
+    stubToLongMaxM?: number
   },
 ): { merged: MergedWallSegment[]; stubsRemoved: number } {
+  const stubMaxLenM = opts.stubMaxLenM ?? DEFAULT_REDUNDANT_STUB_MAX_LEN_M
+  const stubLongMinLenM = opts.stubLongMinLenM ?? DEFAULT_REDUNDANT_STUB_LONG_MIN_LEN_M
+  const stubPerpDotMax = opts.stubPerpDotMax ?? DEFAULT_REDUNDANT_STUB_PERP_DOT_MAX
+  const stubToLongMaxM = opts.stubToLongMaxM ?? DEFAULT_REDUNDANT_STUB_TO_LONG_MAX_M
   type Sc = {
     sx: number
     sy: number
@@ -725,7 +919,7 @@ export function removeRedundantCornerStubs(
     if (w.mapping.target.kind === 'wall' && w.mapping.target.variant === 'column_outline') {
       continue
     }
-    if (sc.len >= REDUNDANT_STUB_LONG_MIN_LEN_M) {
+    if (sc.len >= stubLongMinLenM) {
       longIdx.push(i)
     }
   }
@@ -739,7 +933,7 @@ export function removeRedundantCornerStubs(
     if (w.mapping.target.kind === 'wall' && w.mapping.target.variant === 'column_outline') {
       continue
     }
-    if (sc.len > REDUNDANT_STUB_MAX_LEN_M) {
+    if (sc.len > stubMaxLenM) {
       continue
     }
 
@@ -757,13 +951,13 @@ export function removeRedundantCornerStubs(
 
       /** sc.ux/uy 已为切向单位向量；与长墙近乎垂直时 |cos| 小 */
       const cosAlign = Math.abs(sc.ux * long.sc.ux + sc.uy * long.sc.uy)
-      if (cosAlign > REDUNDANT_STUB_PERP_DOT_MAX) {
+      if (cosAlign > stubPerpDotMax) {
         continue
       }
 
       const d0 = distPointToFiniteSegment(sc.sx, sc.sy, long.sc.sx, long.sc.sy, long.sc.ex, long.sc.ey)
       const d1 = distPointToFiniteSegment(sc.ex, sc.ey, long.sc.sx, long.sc.sy, long.sc.ex, long.sc.ey)
-      if (Math.min(d0, d1) <= REDUNDANT_STUB_TO_LONG_MAX_M) {
+      if (Math.min(d0, d1) <= stubToLongMaxM) {
         remove.add(i)
         break
       }

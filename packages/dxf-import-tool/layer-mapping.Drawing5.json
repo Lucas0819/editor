@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "description": "Drawing5.dxf — 北医药物依赖所改造20250422。7 层纵向沿 Y 铺开，xref 前缀统一为「北医药物依赖所改造20250422$0$」，另有一条双 $ 前缀层。",
-  "layerAnalysis": "共 28 个图层。所有专业图层均带 xref 前缀「北医药物依赖所改造20250422$0$」；仅 0、Defpoints、E-GENE-文字、PUB_HATCH、楼层名称 5 层无前缀。建筑专业层（A-WALL、A-WIND、A-DOOR 无独立层）完整，含柱(A-COLU)、楼梯(A-PLAN-STAIR)、电梯(A-PLAN-EVTR)、屋面排水(A-ROOF-DRAN)、板洞(A-板空洞)。机电层含消防(P-FIRE)和暖通(M-H/M-V)。WINDOW 层的 AcAecLayerStandard 备注「存放插入的门图块」，说明门窗几何混在 WINDOW 层。楼层标题文字在独立图层「楼层名称」上，Y 坐标清晰分隔 7 层。",
+  "description": "Drawing5.dxf — 北医药物依赖所改造20250422。7 层纵向沿 Y 铺开，xref 前缀统一为「北医药物依赖所改造20250422$0$」，另有一条双 $ 前缀层。WINDOW 层备注「存放插入的门图块」，门窗几何混在 WINDOW 层；天正 _TCH_WINDOW 层在 LAYER 表中不存在，但 ENTITIES 中可能有实体引用该层，按规则显式映射。",
+  "layerAnalysis": "共 28 个图层（LAYER 表）。所有专业图层均带 xref 前缀「北医药物依赖所改造20250422$0$」；仅 0、Defpoints、E-GENE-文字、PUB_HATCH、楼层名称 5 层无前缀。建筑专业层完整：墙(A-WALL/WALL/A-WALL-MOVE)、柱(A-COLU)、窗(A-WIND/WINDOW)、楼梯(A-PLAN-STAIR)、电梯(A-PLAN-EVTR)、屋面排水(A-ROOF-DRAN)、板洞(A-板空洞)。无独立 A-DOOR 层——门图块混放在 WINDOW 层中（由 INSERT 块名区分，不影响图层映射）。机电层含消防(P-FIRE-消火栓/立管)和暖通(M-H-散热器/M-V-排风管)。填充层(PUB_HATCH/A-ANNO-PUB-HATCH)skip。楼层标题在「楼层名称」图层上，7 个 TEXT 沿 Y 清晰分隔。",
   "floorPlan": {
     "schemaVersion": 1,
     "levelCount": 7,
@@ -11,58 +11,37 @@
       {
         "levelIndex": 0,
         "labels": ["一层平面图"],
-        "range": { "yMin": 0, "yMax": 30707.60 },
-        "confidence": "high",
-        "source": "text_anchors",
-        "notes": "TEXT 插入点 Y=6159.61；上界取与二层中点 (6159.61+55255.58)/2=30707.60"
+        "range": { "yMin": 0, "yMax": 30707.60 }
       },
       {
         "levelIndex": 1,
         "labels": ["二层平面图"],
-        "range": { "yMin": 30707.60, "yMax": 80574.53 },
-        "confidence": "high",
-        "source": "text_anchors",
-        "notes": "TEXT 插入点 Y=55255.58；下界=30707.60，上界=(55255.58+105893.49)/2=80574.53"
+        "range": { "yMin": 30707.60, "yMax": 80574.53 }
       },
       {
         "levelIndex": 2,
         "labels": ["三层平面图"],
-        "range": { "yMin": 80574.53, "yMax": 131787.11 },
-        "confidence": "high",
-        "source": "text_anchors",
-        "notes": "TEXT 插入点 Y=105893.49；下界=80574.53，上界=(105893.49+157680.73)/2=131787.11"
+        "range": { "yMin": 80574.53, "yMax": 131787.11 }
       },
       {
         "levelIndex": 3,
         "labels": ["四层平面图"],
-        "range": { "yMin": 131787.11, "yMax": 181491.43 },
-        "confidence": "high",
-        "source": "text_anchors",
-        "notes": "TEXT 插入点 Y=157680.73；下界=131787.11，上界=(157680.73+205302.12)/2=181491.43"
+        "range": { "yMin": 131787.11, "yMax": 181491.43 }
       },
       {
         "levelIndex": 4,
         "labels": ["五层平面图"],
-        "range": { "yMin": 181491.43, "yMax": 230825.20 },
-        "confidence": "high",
-        "source": "text_anchors",
-        "notes": "TEXT 插入点 Y=205302.12；下界=181491.43，上界=(205302.12+256348.28)/2=230825.20"
+        "range": { "yMin": 181491.43, "yMax": 230825.20 }
       },
       {
         "levelIndex": 5,
         "labels": ["六层平面图"],
-        "range": { "yMin": 230825.20, "yMax": 282571.33 },
-        "confidence": "high",
-        "source": "text_anchors",
-        "notes": "TEXT 插入点 Y=256348.28；下界=230825.20，上界=(256348.28+308794.38)/2=282571.33"
+        "range": { "yMin": 230825.20, "yMax": 282571.33 }
       },
       {
         "levelIndex": 6,
         "labels": ["屋顶层平面图"],
-        "range": { "yMin": 282571.33, "yMax": null },
-        "confidence": "high",
-        "source": "text_anchors",
-        "notes": "TEXT 插入点 Y=308794.38；下界=282571.33，上界未设（屋顶层为最顶层）"
+        "range": { "yMin": 282571.33, "yMax": null }
       }
     ]
   },
@@ -82,6 +61,7 @@
     "A-WIND": { "target": { "kind": "window" }, "confidence": "high" },
     "A-WIND-TEXT": { "target": { "kind": "annotation" }, "confidence": "high" },
     "WINDOW": { "target": { "kind": "window" }, "confidence": "high" },
+    "_TCH_WINDOW": { "target": { "kind": "window" }, "confidence": "high" },
     "WINDOW_TEXT": { "target": { "kind": "annotation" }, "confidence": "high" },
     "A-ANNO-PUB-HATCH": { "target": { "kind": "skip" }, "confidence": "high" },
     "A-ANNO-PUB-TEXT": { "target": { "kind": "annotation" }, "confidence": "high" },
@@ -103,6 +83,7 @@
     "北医药物依赖所改造20250422$0$A-WIND": { "target": { "kind": "window" }, "confidence": "high" },
     "北医药物依赖所改造20250422$0$A-WIND-TEXT": { "target": { "kind": "annotation" }, "confidence": "high" },
     "北医药物依赖所改造20250422$0$WINDOW": { "target": { "kind": "window" }, "confidence": "high" },
+    "北医药物依赖所改造20250422$0$_TCH_WINDOW": { "target": { "kind": "window" }, "confidence": "high" },
     "北医药物依赖所改造20250422$0$WINDOW_TEXT": { "target": { "kind": "annotation" }, "confidence": "high" },
     "北医药物依赖所改造20250422$0$A-ANNO-PUB-HATCH": { "target": { "kind": "skip" }, "confidence": "high" },
     "北医药物依赖所改造20250422$0$PUB_HATCH": { "target": { "kind": "skip" }, "confidence": "high" },

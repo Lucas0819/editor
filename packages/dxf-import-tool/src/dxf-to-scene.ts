@@ -53,7 +53,7 @@ import {
   DXF_IMPORT_WINDOW_DEFAULTS,
 } from './dxf-scene-nodes.ts'
 import {
-  mergeColinearGapWallPieces,
+  mergeColinearGapWallPiecesIterative,
   mergeDoubleWallLineSegments,
   removeRedundantCornerStubs,
 } from './merge-double-wall-lines.ts'
@@ -96,6 +96,22 @@ function parseArgs(argv: string[]) {
   let doubleWallMinOverlapM = 0.04
   /** 双线合并：两段长度比下限；0=不限制（旧行为）。默认 0.75 避免长墙与短隔墙并成一组 */
   let doubleWallMinLengthRatio = 0.75
+  /** 横平竖直共线缝合并：轴向间隙上限（米） */
+  let colinearGapMergeMaxM = 0.75
+  /** 法向容差（米） */
+  let colinearGapMergePerpTolM = 0.06
+  /** 分组桶宽（米），见 merge-double-wall-lines 默认值 */
+  let colinearGapMergeBucketM = 0.01
+  /** 共线缝合并最大轮数（每轮内链式合并，多轮可继续并） */
+  let colinearGapMergeMaxPasses = 20
+  /** 横平竖直判定半角（度），略大则更多微斜段参与水平/竖直合并 */
+  let colinearGapMergeAxisAlignDeg = 2.5
+  /** 斜向段按同一无限长直线做区间合并（与横平竖直逻辑并行） */
+  let colinearGapMergeGeneralDirection = false
+  /** 墙角短肢删除：短肢最大长度（米） */
+  let redundantStubMaxLenM = 0.4
+  /** 长墙最短长度（米），短肢相对其判断 */
+  let redundantStubLongMinLenM = 2.0
 
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -152,6 +168,43 @@ function parseArgs(argv: string[]) {
     } else if (a === '--double-wall-min-length-ratio') {
       const v = Number.parseFloat(argv[++i] ?? '0')
       doubleWallMinLengthRatio = Number.isFinite(v) && v >= 0 && v <= 1 ? v : doubleWallMinLengthRatio
+    } else if (a === '--colinear-gap-merge-max-m') {
+      const v = Number.parseFloat(argv[++i] ?? '')
+      if (Number.isFinite(v) && v > 0) {
+        colinearGapMergeMaxM = v
+      }
+    } else if (a === '--colinear-gap-merge-perp-tol-m') {
+      const v = Number.parseFloat(argv[++i] ?? '')
+      if (Number.isFinite(v) && v > 0) {
+        colinearGapMergePerpTolM = v
+      }
+    } else if (a === '--colinear-gap-merge-bucket-m') {
+      const v = Number.parseFloat(argv[++i] ?? '')
+      if (Number.isFinite(v) && v > 0) {
+        colinearGapMergeBucketM = v
+      }
+    } else if (a === '--colinear-gap-merge-max-passes') {
+      const v = Number.parseInt(argv[++i] ?? '', 10)
+      if (Number.isFinite(v) && v >= 1 && v <= 50) {
+        colinearGapMergeMaxPasses = v
+      }
+    } else if (a === '--colinear-gap-merge-axis-align-deg') {
+      const v = Number.parseFloat(argv[++i] ?? '')
+      if (Number.isFinite(v) && v > 0 && v <= 45) {
+        colinearGapMergeAxisAlignDeg = v
+      }
+    } else if (a === '--colinear-gap-merge-general-direction') {
+      colinearGapMergeGeneralDirection = true
+    } else if (a === '--redundant-stub-max-len-m') {
+      const v = Number.parseFloat(argv[++i] ?? '')
+      if (Number.isFinite(v) && v > 0 && v <= 5) {
+        redundantStubMaxLenM = v
+      }
+    } else if (a === '--redundant-stub-long-min-len-m') {
+      const v = Number.parseFloat(argv[++i] ?? '')
+      if (Number.isFinite(v) && v >= 0.5 && v <= 20) {
+        redundantStubLongMinLenM = v
+      }
     }
   }
 
@@ -174,6 +227,14 @@ function parseArgs(argv: string[]) {
     doubleWallMaxSpacingM,
     doubleWallMinOverlapM,
     doubleWallMinLengthRatio,
+    colinearGapMergeMaxM,
+    colinearGapMergePerpTolM,
+    colinearGapMergeBucketM,
+    colinearGapMergeMaxPasses,
+    colinearGapMergeAxisAlignDeg,
+    colinearGapMergeGeneralDirection,
+    redundantStubMaxLenM,
+    redundantStubLongMinLenM,
   }
 }
 
@@ -285,6 +346,14 @@ function buildSceneGraph(
     doubleWallMaxSpacingM: number
     doubleWallMinOverlapM: number
     doubleWallMinLengthRatio: number
+    colinearGapMergeMaxM: number
+    colinearGapMergePerpTolM: number
+    colinearGapMergeBucketM: number
+    colinearGapMergeMaxPasses: number
+    colinearGapMergeAxisAlignDeg: number
+    colinearGapMergeGeneralDirection: boolean
+    redundantStubMaxLenM: number
+    redundantStubLongMinLenM: number
     /** 门窗 INSERT（WIN2D / DorLib 等）；与墙段关联后写入墙 children，否则生成短墙 */
     inserts: PlanInsert[]
     /** 各层分割轴锚点（与 `computePerLevelSplitAxisAnchorFromGeometry`） */
@@ -332,6 +401,8 @@ function buildSceneGraph(
     fromDoubleLineMerge: boolean
   }
 
+  const taggedWallSegmentCount = tagged.length
+
   let wallPieces: WallPiece[]
   let mergeStats: { sourceSegmentsMerged: number; wallsReduced: number } | null = null
   if (opts.mergeDoubleWallLines) {
@@ -357,21 +428,31 @@ function buildSceneGraph(
       fromDoubleLineMerge: false,
     }))
   }
+  const wallPiecesAfterDoubleMerge = wallPieces.length
 
   let colinearGapPiecesReduced = 0
+  let colinearGapMergePasses = 0
   let redundantCornerStubsRemoved = 0
   {
-    const col = mergeColinearGapWallPieces(wallPieces, {
+    const col = mergeColinearGapWallPiecesIterative(wallPieces, {
       ox,
       oy,
       scale,
       offset: opts.offset,
       flipX: opts.flipX,
       flipY: opts.flipY,
+      maxGapM: opts.colinearGapMergeMaxM,
+      perpTolM: opts.colinearGapMergePerpTolM,
+      bucketM: opts.colinearGapMergeBucketM,
+      maxPasses: opts.colinearGapMergeMaxPasses,
+      axisAlignRad: (opts.colinearGapMergeAxisAlignDeg * Math.PI) / 180,
+      mergeGeneralDirection: opts.colinearGapMergeGeneralDirection,
     })
     colinearGapPiecesReduced = col.piecesReduced
+    colinearGapMergePasses = col.passes
     wallPieces = col.merged
   }
+  const wallPiecesAfterColinearGap = wallPieces.length
   {
     const stub = removeRedundantCornerStubs(wallPieces, {
       ox,
@@ -380,10 +461,13 @@ function buildSceneGraph(
       offset: opts.offset,
       flipX: opts.flipX,
       flipY: opts.flipY,
+      stubMaxLenM: opts.redundantStubMaxLenM,
+      stubLongMinLenM: opts.redundantStubLongMinLenM,
     })
     redundantCornerStubsRemoved = stub.stubsRemoved
     wallPieces = stub.merged
   }
+  const wallPiecesAfterStubRemoval = wallPieces.length
 
   let columnOutlineRectanglesMerged = 0
   {
@@ -399,6 +483,7 @@ function buildSceneGraph(
     wallPieces = mr.merged
     columnOutlineRectanglesMerged = mr.rectanglesMerged
   }
+  const geometricWallPiecesBeforeOpenings = wallPieces.length
 
   /** 承重柱（column_outline）：柱 INSERT 用 `columnThicknessM`（sx/sy×比例）；纯线段仍按边长估厚 */
   const columnOutlineThicknessCapM = 3
@@ -500,6 +585,7 @@ function buildSceneGraph(
   }
   if (colinearGapPiecesReduced > 0) {
     siteMeta.mergeColinearGapReduced = colinearGapPiecesReduced
+    siteMeta.mergeColinearGapPasses = colinearGapMergePasses
   }
   if (redundantCornerStubsRemoved > 0) {
     siteMeta.redundantCornerStubsRemoved = redundantCornerStubsRemoved
@@ -534,6 +620,19 @@ function buildSceneGraph(
     siteMeta.dxfOpeningResolved = openingResolved.length
     siteMeta.dxfOpeningAttach = openingResolved.filter((r) => r.mode === 'attach').length
     siteMeta.dxfOpeningSyntheticWalls = openingResolved.filter((r) => r.mode === 'synthetic').length
+  }
+
+  const syntheticOpeningWallCount = openingResolved.filter((r) => r.mode === 'synthetic').length
+  siteMeta.wallPipelineTaggedSegments = taggedWallSegmentCount
+  siteMeta.wallPipelinePiecesAfterDoubleMerge = wallPiecesAfterDoubleMerge
+  siteMeta.wallPipelinePiecesAfterColinearGap = wallPiecesAfterColinearGap
+  siteMeta.wallPipelinePiecesAfterStubRemoval = wallPiecesAfterStubRemoval
+  siteMeta.wallPipelineGeometricPiecesBeforeOpenings = geometricWallPiecesBeforeOpenings
+  siteMeta.wallPipelineSyntheticOpeningWalls = syntheticOpeningWallCount
+  if (taggedWallSegmentCount > 0) {
+    const geom = geometricWallPiecesBeforeOpenings
+    siteMeta.wallPipelineGeometricReductionOfTagged = (taggedWallSegmentCount - geom) / taggedWallSegmentCount
+    siteMeta.wallPipelineGeometricRetentionOfTagged = geom / taggedWallSegmentCount
   }
 
   const attachList = openingResolved.filter((r): r is OpeningAttach => r.mode === 'attach')
@@ -961,8 +1060,11 @@ async function main() {
     args.offset,
     args.axisSnapToleranceM,
   )
+
+  const fp = layerMapping?.floorPlan ?? null
+
   const perLevelAnchor = computePerLevelSplitAxisAnchorFromGeometry(
-    layerMapping?.floorPlan ?? null,
+    fp,
     segments,
     inserts,
     layerMapping?.map ?? null,
@@ -995,6 +1097,14 @@ async function main() {
     doubleWallMaxSpacingM: args.doubleWallMaxSpacingM,
     doubleWallMinOverlapM: args.doubleWallMinOverlapM,
     doubleWallMinLengthRatio: args.doubleWallMinLengthRatio,
+    colinearGapMergeMaxM: args.colinearGapMergeMaxM,
+    colinearGapMergePerpTolM: args.colinearGapMergePerpTolM,
+    colinearGapMergeBucketM: args.colinearGapMergeBucketM,
+    colinearGapMergeMaxPasses: args.colinearGapMergeMaxPasses,
+    colinearGapMergeAxisAlignDeg: args.colinearGapMergeAxisAlignDeg,
+    colinearGapMergeGeneralDirection: args.colinearGapMergeGeneralDirection,
+    redundantStubMaxLenM: args.redundantStubMaxLenM,
+    redundantStubLongMinLenM: args.redundantStubLongMinLenM,
     inserts,
     perLevelAnchor,
   })
@@ -1017,6 +1127,27 @@ async function main() {
   console.error(
     `Levels: ${levelCount}, slabs: ${slabCount}, walls: ${wallCount}, windows: ${windowCount}, doors: ${doorCount}`,
   )
+
+  const siteNode = Object.values(scene.nodes).find((n) => (n as { type?: string }).type === 'site') as
+    | { metadata?: Record<string, unknown> }
+    | undefined
+  const pm = siteNode?.metadata
+  if (pm && typeof pm.wallPipelineTaggedSegments === 'number') {
+    const t = pm.wallPipelineTaggedSegments
+    const g = pm.wallPipelineGeometricPiecesBeforeOpenings
+    const syn = typeof pm.wallPipelineSyntheticOpeningWalls === 'number' ? pm.wallPipelineSyntheticOpeningWalls : 0
+    const geomNum = typeof g === 'number' ? g : 0
+    const red = t > 0 ? ((t - geomNum) / t) * 100 : 0
+    const ret = t > 0 ? (geomNum / t) * 100 : 0
+    console.error(
+      `Wall pipeline (geometry vs tagged LINE segments): tagged ${t} → double-merge ${pm.wallPipelinePiecesAfterDoubleMerge} → colinear ${pm.wallPipelinePiecesAfterColinearGap} → stub ${pm.wallPipelinePiecesAfterStubRemoval} → before openings ${geomNum} | reduction ${red.toFixed(1)}% of tagged, retention ${ret.toFixed(1)}% (expecting ~2/3 reduction ⇒ retention ~33% only if most segments are redundant pairs/gaps on the same wall)`,
+    )
+    if (syn > 0) {
+      console.error(
+        `Synthetic opening walls (INSERT could not attach; add ${syn} wall node(s), hurts net reduction): ${syn}`,
+      )
+    }
+  }
 
   const outPath = resolve(args.out)
   await mkdir(dirname(outPath), { recursive: true })
