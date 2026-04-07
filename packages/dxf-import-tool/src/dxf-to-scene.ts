@@ -92,14 +92,15 @@ function parseArgs(argv: string[]) {
   /** 将同层平行双线合并为中心线，厚度取两线间距（CAD 墙厚表达） */
   let mergeDoubleWallLines = false
   let doubleWallMinSpacingM = 0.02
-  let doubleWallMaxSpacingM = 0.65
+  /** 略放宽以容纳窗洞四条线、厚墙双线的外沿间距 */
+  let doubleWallMaxSpacingM = 0.72
   let doubleWallMinOverlapM = 0.04
-  /** 双线合并：两段长度比下限；0=不限制（旧行为）。默认 0.75 避免长墙与短隔墙并成一组 */
-  let doubleWallMinLengthRatio = 0.75
-  /** 横平竖直共线缝合并：轴向间隙上限（米） */
-  let colinearGapMergeMaxM = 0.75
-  /** 法向容差（米） */
-  let colinearGapMergePerpTolM = 0.06
+  /** 双线合并：两段长度比下限；0=不限制。略放宽使门洞旁短线与长墙仍可能成对合并 */
+  let doubleWallMinLengthRatio = 0.5
+  /** 横平竖直共线缝合并：轴向间隙上限（米），门洞处无双线时常需跨过 ~1–2m */
+  let colinearGapMergeMaxM = 2.0
+  /** 法向容差（米）；与同立面条带分桶一致，窗洞多线合并后的中心线漂移 */
+  let colinearGapMergePerpTolM = 0.1
   /** 分组桶宽（米），见 merge-double-wall-lines 默认值 */
   let colinearGapMergeBucketM = 0.01
   /** 共线缝合并最大轮数（每轮内链式合并，多轮可继续并） */

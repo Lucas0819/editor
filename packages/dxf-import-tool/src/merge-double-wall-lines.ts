@@ -430,10 +430,13 @@ export function mergeDoubleWallLineSegments(
   return { merged: out, sourceSegmentsMerged, wallsReduced }
 }
 
-/** 两段共线墙在轴向上的端点间隙 ≤ 此值（米）时合并（双线合并后门洞两侧常留 ~0.4–0.7m 缝；过大则会把整层同标高墙串成一条） */
-export const DEFAULT_COLINEAR_GAP_MERGE_MAX_M = 0.75
-/** 两段墙平行于同一轴线时，法向偏移 ≤ 此值（米）才视为同一立面 */
-export const DEFAULT_COLINEAR_GAP_MERGE_PERP_TOL_M = 0.06
+/**
+ * 两段共线墙在轴向上的端点间隙 ≤ 此值（米）时合并。
+ * 门洞处常无双线，立面被拆成多段；默认约 2m 以覆盖常见单扇门洞+门框（仍依赖同条带 + 同图层，避免整层串墙）。
+ */
+export const DEFAULT_COLINEAR_GAP_MERGE_MAX_M = 2.0
+/** 两段墙平行于同一轴线时，法向偏移 ≤ 此值（米）才视为同一立面（窗洞四条线合并后的中心线漂移等） */
+export const DEFAULT_COLINEAR_GAP_MERGE_PERP_TOL_M = 0.1
 /**
  * 分组键用的平面桶宽（米）。过小会把同一立面因双线合并/浮点漂移拆到不同组，无法链式合并；
  * 键为 `round(coord / bucketM) * bucketM`，与旧版 0.01 一致；可用 CLI 加大（如 0.02–0.025）减少漂移拆组。
@@ -473,6 +476,11 @@ export function mergeColinearGapWallPieces(
   const axisAlignRad = opts.axisAlignRad ?? DEFAULT_COLINEAR_GAP_AXIS_ALIGN_RAD
   const mergeGeneralDirection = opts.mergeGeneralDirection ?? false
   const bucketCoord = (coord: number) => Math.round(coord / bucketM) * bucketM
+  /**
+   * 条带分组桶宽：略大于 perpTol，避免 y=5.00 与 y=5.10 落在相邻整数桶而无法进入同一组（canMerge 仍用法向 perpTol 收紧）。
+   */
+  const stripGroupWidthM = Math.max(perpTolM * 2, 0.08)
+  const stripBandKey = (coord: number) => Math.floor(coord / stripGroupWidthM) * stripGroupWidthM
   const sinAxis = Math.sin(axisAlignRad)
   const isHorizontal = (s: PlanSegment): boolean | null => {
     const [sx, sy] = transformPoint(s.x0, s.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
@@ -543,40 +551,6 @@ export function mergeColinearGapWallPieces(
   const sameLayer = (a: MergedWallSegment, b: MergedWallSegment): boolean =>
     canonicalDxfLayerName(a.seg.layer) === canonicalDxfLayerName(b.seg.layer)
 
-  const mergeHorizPair = (a: Horiz, b: Horiz): Horiz => {
-    const lo = Math.min(a.lo, b.lo)
-    const hi = Math.max(a.hi, b.hi)
-    const yMid = (a.yMid + b.yMid) / 2
-    const [x0, y0] = inverseTransformPoint(lo, yMid, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
-    const [x1, y1] = inverseTransformPoint(hi, yMid, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
-    const seg: PlanSegment = { x0, y0, x1, y1, layer: a.w.seg.layer }
-    const merged: MergedWallSegment = {
-      seg,
-      levelIndex: a.w.levelIndex,
-      mapping: a.w.mapping,
-      thicknessM: Math.max(a.w.thicknessM, b.w.thicknessM),
-      fromDoubleLineMerge: a.w.fromDoubleLineMerge || b.w.fromDoubleLineMerge,
-    }
-    return { w: merged, lo, hi, yMid }
-  }
-
-  const mergeVertPair = (a: Vert, b: Vert): Vert => {
-    const lo = Math.min(a.lo, b.lo)
-    const hi = Math.max(a.hi, b.hi)
-    const xMid = (a.xMid + b.xMid) / 2
-    const [x0, y0] = inverseTransformPoint(xMid, lo, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
-    const [x1, y1] = inverseTransformPoint(xMid, hi, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
-    const seg: PlanSegment = { x0, y0, x1, y1, layer: a.w.seg.layer }
-    const merged: MergedWallSegment = {
-      seg,
-      levelIndex: a.w.levelIndex,
-      mapping: a.w.mapping,
-      thicknessM: Math.max(a.w.thicknessM, b.w.thicknessM),
-      fromDoubleLineMerge: a.w.fromDoubleLineMerge || b.w.fromDoubleLineMerge,
-    }
-    return { w: merged, lo, hi, xMid }
-  }
-
   const canMergeHoriz = (a: Horiz, b: Horiz): boolean => {
     if (a.w.levelIndex !== b.w.levelIndex || !sameLayer(a.w, b.w)) {
       return false
@@ -607,64 +581,147 @@ export function mergeColinearGapWallPieces(
     return gap <= maxGapM + 1e-9
   }
 
+  /** 同一连通组内多段并成一条（长度加权 yMid，与逐对 merge 等价于同一包络） */
+  const mergeHorizCluster = (parts: Horiz[]): Horiz => {
+    let lo = Number.POSITIVE_INFINITY
+    let hi = Number.NEGATIVE_INFINITY
+    let sumY = 0
+    let wlen = 0
+    let maxTh = 0
+    let fd = false
+    for (const p of parts) {
+      lo = Math.min(lo, p.lo)
+      hi = Math.max(hi, p.hi)
+      const len = Math.max(p.hi - p.lo, 1e-12)
+      sumY += p.yMid * len
+      wlen += len
+      maxTh = Math.max(maxTh, p.w.thicknessM)
+      fd = fd || p.w.fromDoubleLineMerge
+    }
+    const yMid = wlen > 1e-9 ? sumY / wlen : parts[0]!.yMid
+    const first = parts[0]!
+    const [x0, y0] = inverseTransformPoint(lo, yMid, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [x1, y1] = inverseTransformPoint(hi, yMid, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const seg: PlanSegment = { x0, y0, x1, y1, layer: first.w.seg.layer }
+    const merged: MergedWallSegment = {
+      seg,
+      levelIndex: first.w.levelIndex,
+      mapping: first.w.mapping,
+      thicknessM: maxTh,
+      fromDoubleLineMerge: fd,
+    }
+    return { w: merged, lo, hi, yMid }
+  }
+
+  const mergeVertCluster = (parts: Vert[]): Vert => {
+    let lo = Number.POSITIVE_INFINITY
+    let hi = Number.NEGATIVE_INFINITY
+    let sumX = 0
+    let wlen = 0
+    let maxTh = 0
+    let fd = false
+    for (const p of parts) {
+      lo = Math.min(lo, p.lo)
+      hi = Math.max(hi, p.hi)
+      const len = Math.max(p.hi - p.lo, 1e-12)
+      sumX += p.xMid * len
+      wlen += len
+      maxTh = Math.max(maxTh, p.w.thicknessM)
+      fd = fd || p.w.fromDoubleLineMerge
+    }
+    const xMid = wlen > 1e-9 ? sumX / wlen : parts[0]!.xMid
+    const first = parts[0]!
+    const [x0, y0] = inverseTransformPoint(xMid, lo, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [x1, y1] = inverseTransformPoint(xMid, hi, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const seg: PlanSegment = { x0, y0, x1, y1, layer: first.w.seg.layer }
+    const merged: MergedWallSegment = {
+      seg,
+      levelIndex: first.w.levelIndex,
+      mapping: first.w.mapping,
+      thicknessM: maxTh,
+      fromDoubleLineMerge: fd,
+    }
+    return { w: merged, lo, hi, xMid }
+  }
+
   let piecesReduced = 0
 
-  /** 仅同标高、同图层的水平段才能链式合并；全局按 x 排序会被其它楼层的水平段打断 */
+  /** 同标高、同图层、同条带（法向容差分桶）的水平段：并查集连通后再并成包络（门洞仅左右两段时也能并） */
   const horizGroups = new Map<string, Horiz[]>()
   for (const h of horiz) {
-    const key = `${h.w.levelIndex}::${canonicalDxfLayerName(h.w.seg.layer)}::${bucketCoord(h.yMid)}`
+    const key = `${h.w.levelIndex}::${canonicalDxfLayerName(h.w.seg.layer)}::${stripBandKey(h.yMid)}`
     const list = horizGroups.get(key) ?? []
     list.push(h)
     horizGroups.set(key, list)
   }
   const mergedHoriz: Horiz[] = []
   for (const group of horizGroups.values()) {
-    group.sort((a, b) => a.lo - b.lo)
-    let i = 0
-    while (i < group.length) {
-      let cur = group[i]!
-      let j = i + 1
-      while (j < group.length) {
-        const next = group[j]!
-        if (canMergeHoriz(cur, next)) {
-          piecesReduced += 1
-          cur = mergeHorizPair(cur, next)
-          j++
-        } else {
-          break
+    const n = group.length
+    if (n === 1) {
+      mergedHoriz.push(group[0]!)
+      continue
+    }
+    const uf = new UnionFind(n)
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (canMergeHoriz(group[i]!, group[j]!)) {
+          uf.union(i, j)
         }
       }
-      mergedHoriz.push(cur)
-      i = j
+    }
+    const comp = new Map<number, number[]>()
+    for (let i = 0; i < n; i++) {
+      const r = uf.find(i)
+      const arr = comp.get(r) ?? []
+      arr.push(i)
+      comp.set(r, arr)
+    }
+    for (const idxs of comp.values()) {
+      if (idxs.length === 1) {
+        mergedHoriz.push(group[idxs[0]!]!)
+      } else {
+        piecesReduced += idxs.length - 1
+        mergedHoriz.push(mergeHorizCluster(idxs.map((i) => group[i]!)))
+      }
     }
   }
 
   const vertGroups = new Map<string, Vert[]>()
   for (const v of vert) {
-    const key = `${v.w.levelIndex}::${canonicalDxfLayerName(v.w.seg.layer)}::${bucketCoord(v.xMid)}`
+    const key = `${v.w.levelIndex}::${canonicalDxfLayerName(v.w.seg.layer)}::${stripBandKey(v.xMid)}`
     const list = vertGroups.get(key) ?? []
     list.push(v)
     vertGroups.set(key, list)
   }
   const mergedVert: Vert[] = []
   for (const group of vertGroups.values()) {
-    group.sort((a, b) => a.lo - b.lo)
-    let i = 0
-    while (i < group.length) {
-      let cur = group[i]!
-      let j = i + 1
-      while (j < group.length) {
-        const next = group[j]!
-        if (canMergeVert(cur, next)) {
-          piecesReduced += 1
-          cur = mergeVertPair(cur, next)
-          j++
-        } else {
-          break
+    const n = group.length
+    if (n === 1) {
+      mergedVert.push(group[0]!)
+      continue
+    }
+    const uf = new UnionFind(n)
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        if (canMergeVert(group[i]!, group[j]!)) {
+          uf.union(i, j)
         }
       }
-      mergedVert.push(cur)
-      i = j
+    }
+    const comp = new Map<number, number[]>()
+    for (let i = 0; i < n; i++) {
+      const r = uf.find(i)
+      const arr = comp.get(r) ?? []
+      arr.push(i)
+      comp.set(r, arr)
+    }
+    for (const idxs of comp.values()) {
+      if (idxs.length === 1) {
+        mergedVert.push(group[idxs[0]!]!)
+      } else {
+        piecesReduced += idxs.length - 1
+        mergedVert.push(mergeVertCluster(idxs.map((i) => group[i]!)))
+      }
     }
   }
 
