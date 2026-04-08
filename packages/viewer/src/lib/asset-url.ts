@@ -1,6 +1,7 @@
 import { loadAssetUrl } from '@pascal-app/core'
 
-export const ASSETS_CDN_URL = process.env.NEXT_PUBLIC_ASSETS_CDN_URL || 'https://editor.pascal.app'
+/** Base for `/items/...` paths. Default empty = same origin (e.g. `public/` via Next). Set `NEXT_PUBLIC_ASSETS_CDN_URL` for an external asset host. */
+export const ASSETS_CDN_URL = process.env.NEXT_PUBLIC_ASSETS_CDN_URL ?? ''
 
 /**
  * Resolves an asset URL to the appropriate format:
