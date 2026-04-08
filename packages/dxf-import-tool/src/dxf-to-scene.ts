@@ -53,6 +53,8 @@ import {
   DXF_IMPORT_WINDOW_DEFAULTS,
 } from './dxf-scene-nodes.ts'
 import {
+  DEFAULT_DOUBLE_WALL_MAX_MERGED_THICKNESS_M,
+  DEFAULT_DOUBLE_WALL_MAX_SPACING_M,
   mergeColinearGapWallPiecesIterative,
   mergeDoubleWallLineSegments,
   removeContainedParallelFragments,
@@ -93,13 +95,15 @@ function parseArgs(argv: string[]) {
   /** 将同层平行双线合并为中心线，厚度取两线间距（CAD 墙厚表达） */
   let mergeDoubleWallLines = false
   let doubleWallMinSpacingM = 0.02
-  /** 略放宽以容纳窗洞四条线、厚墙双线的外沿间距 */
-  let doubleWallMaxSpacingM = 0.72
+  /** 两平行线法向间距超过此值（米）则不两两合并；默认 0.5 */
+  let doubleWallMaxSpacingM = DEFAULT_DOUBLE_WALL_MAX_SPACING_M
+  /** 并查集合并后若整组厚度 cMax−cMin 超过此值（米）则放弃合并；默认 0.5 */
+  let doubleWallMaxMergedThicknessM = DEFAULT_DOUBLE_WALL_MAX_MERGED_THICKNESS_M
   let doubleWallMinOverlapM = 0.04
   /** 双线合并：两段长度比下限；0=不限制。略放宽使门洞旁短线与长墙仍可能成对合并 */
   let doubleWallMinLengthRatio = 0.5
-  /** 横平竖直共线缝合并：轴向间隙上限（米），门洞处无双线时常需跨过 ~1–2m */
-  let colinearGapMergeMaxM = 2.0
+  /** 横平竖直共线缝合并：轴向间隙上限（米），默认 0.49；门洞需更大时用 `--colinear-gap-merge-max-m` */
+  let colinearGapMergeMaxM = 0.49
   /** 法向容差（米）；与同立面条带分桶一致，窗洞多线合并后的中心线漂移 */
   let colinearGapMergePerpTolM = 0.1
   /** 分组桶宽（米），见 merge-double-wall-lines 默认值 */
@@ -165,6 +169,11 @@ function parseArgs(argv: string[]) {
       doubleWallMinSpacingM = Number.parseFloat(argv[++i] ?? '') || doubleWallMinSpacingM
     } else if (a === '--double-wall-max-spacing-m') {
       doubleWallMaxSpacingM = Number.parseFloat(argv[++i] ?? '') || doubleWallMaxSpacingM
+    } else if (a === '--double-wall-max-merged-thickness-m') {
+      const v = Number.parseFloat(argv[++i] ?? '')
+      if (Number.isFinite(v) && v > 0 && v <= 5) {
+        doubleWallMaxMergedThicknessM = v
+      }
     } else if (a === '--double-wall-min-overlap-m') {
       doubleWallMinOverlapM = Number.parseFloat(argv[++i] ?? '') || doubleWallMinOverlapM
     } else if (a === '--double-wall-min-length-ratio') {
@@ -227,6 +236,7 @@ function parseArgs(argv: string[]) {
     mergeDoubleWallLines,
     doubleWallMinSpacingM,
     doubleWallMaxSpacingM,
+    doubleWallMaxMergedThicknessM,
     doubleWallMinOverlapM,
     doubleWallMinLengthRatio,
     colinearGapMergeMaxM,
@@ -366,6 +376,7 @@ function buildSceneGraph(
     mergeDoubleWallLines: boolean
     doubleWallMinSpacingM: number
     doubleWallMaxSpacingM: number
+    doubleWallMaxMergedThicknessM: number
     doubleWallMinOverlapM: number
     doubleWallMinLengthRatio: number
     colinearGapMergeMaxM: number
@@ -440,6 +451,7 @@ function buildSceneGraph(
       maxDoubleSpacingM: opts.doubleWallMaxSpacingM,
       minOverlapM: opts.doubleWallMinOverlapM,
       minLengthRatio: opts.doubleWallMinLengthRatio,
+      maxMergedDoubleWallThicknessM: opts.doubleWallMaxMergedThicknessM,
     })
     wallPieces = mr.merged
     mergeStats = { sourceSegmentsMerged: mr.sourceSegmentsMerged, wallsReduced: mr.wallsReduced }
@@ -1173,6 +1185,7 @@ async function main() {
     mergeDoubleWallLines: args.mergeDoubleWallLines,
     doubleWallMinSpacingM: args.doubleWallMinSpacingM,
     doubleWallMaxSpacingM: args.doubleWallMaxSpacingM,
+    doubleWallMaxMergedThicknessM: args.doubleWallMaxMergedThicknessM,
     doubleWallMinOverlapM: args.doubleWallMinOverlapM,
     doubleWallMinLengthRatio: args.doubleWallMinLengthRatio,
     colinearGapMergeMaxM: args.colinearGapMergeMaxM,

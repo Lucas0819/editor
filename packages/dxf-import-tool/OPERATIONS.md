@@ -65,7 +65,8 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 | `--mapping-file` / `-m` | 图层语义 **覆盖** JSON。与内置 `mapDxfLayerToPascal` 合并：先按图层名（完整 trim，再试 canonical，见 `canonicalDxfLayerName`）查表，未命中则回退内置规则 |
 | `--merge-double-wall-lines` | 将**同楼层、同规范图层名**下、互相平行且间距在「双线墙厚」范围内的线段合并为**一条中心线墙**，`thickness` 取两线在平面上的间距（解决 CAD 双线画墙厚、导入后变两堵墙的问题） |
 | `--double-wall-min-spacing-m` | 与上一项连用：视为双线的最小间距（米），默认 `0.02`（过滤噪声） |
-| `--double-wall-max-spacing-m` | 最大间距（米），默认 `0.65`；超过则认为是两堵独立墙 |
+| `--double-wall-max-spacing-m` | 两两合并时最大法向间距（米），默认 `0.5`；超过则不合并 |
+| `--double-wall-max-merged-thickness-m` | 并查集合并后若整组厚度（cMax−cMin）超过此值（米）则放弃合并、各线按默认墙厚输出，默认 `0.5`（避免多线串联出过厚墙） |
 | `--double-wall-min-overlap-m` | 两线在墙方向上的投影重叠至少多长（米）才合并，默认 `0.04` |
 
 当前导出为**单层**（所有墙在同一 `Level`，`level` 字段为 `0`）。

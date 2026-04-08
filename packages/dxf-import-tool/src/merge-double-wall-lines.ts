@@ -236,6 +236,14 @@ function groupKey(levelIndex: number, layer: string): string {
   return `${levelIndex}\0${canonicalDxfLayerName(layer)}`
 }
 
+/** 双线两两可合并的最大法向间距（米），与 CLI `--double-wall-max-spacing-m` 默认一致 */
+export const DEFAULT_DOUBLE_WALL_MAX_SPACING_M = 0.5
+/**
+ * 并查集合并后，若组内 cMax−cMin 超过此值则**不输出合并墙**（回退为多条默认厚度墙），
+ * 避免多线串联把厚度撑到大于常见墙厚。与 CLI `--double-wall-max-merged-thickness-m` 默认一致。
+ */
+export const DEFAULT_DOUBLE_WALL_MAX_MERGED_THICKNESS_M = 0.5
+
 export type MergeDoubleWallResult = {
   merged: MergedWallSegment[]
   /** 参与合并的原始线段条数（每条只计一次，且仅计并入 size>1 组的） */
@@ -263,9 +271,16 @@ export function mergeDoubleWallLineSegments(
     minOverlapM: number
     /** 0 = 不检查长度；否则两段长度比须 ≥ 此值才允许 union（默认由 dxf-to-scene 传入） */
     minLengthRatio: number
+    /**
+     * 合并组最终厚度（cMax−cMin）上限（米）。超过则本组不合并，各线段按 `defaultThicknessM` 输出。
+     * 默认 {@link DEFAULT_DOUBLE_WALL_MAX_MERGED_THICKNESS_M}。
+     */
+    maxMergedDoubleWallThicknessM?: number
   },
 ): MergeDoubleWallResult {
   const sinEps = Math.sin(0.004) // ~0.23°
+  const maxMergedThM =
+    opts.maxMergedDoubleWallThicknessM ?? DEFAULT_DOUBLE_WALL_MAX_MERGED_THICKNESS_M
 
   const mergeable: TaggedWallSegment[] = []
   const insertPassthrough: TaggedWallSegment[] = []
@@ -373,6 +388,12 @@ export function mergeDoubleWallLineSegments(
 
       const cMid = (cMin + cMax) / 2
       const rawT = cMax - cMin
+      if (rawT > maxMergedThM + 1e-9) {
+        for (const i of idxs) {
+          out.push({ ...list[i]!, thicknessM: opts.defaultThicknessM, fromDoubleLineMerge: false })
+        }
+        continue
+      }
       const thicknessM = rawT > 1e-6 ? rawT : opts.defaultThicknessM
 
       const mx0 = nx * cMid + vx * tMin
@@ -430,11 +451,139 @@ export function mergeDoubleWallLineSegments(
   return { merged: out, sourceSegmentsMerged, wallsReduced }
 }
 
+/** 调试：同一楼层+图层列表（与 merge 单组输入一致）内双线并查集分组明细 */
+export type DoubleWallMergeComponentDebug = {
+  memberIndices: number[]
+  thicknessM: number
+  cMin: number
+  cMax: number
+  /** 法向单位向量（与合并输出中心线所用 ref 一致） */
+  n: [number, number]
+  /** 与 merge 内一致：每条线取 p0 在 n 上的投影 c（米） */
+  cPerMember: number[]
+}
+
+export type MergeDoubleWallLineOpts = {
+  ox: number
+  oy: number
+  scale: number
+  offset: boolean
+  flipX: boolean
+  flipY: boolean
+  defaultThicknessM: number
+  minDoubleSpacingM: number
+  maxDoubleSpacingM: number
+  minOverlapM: number
+  minLengthRatio: number
+  maxMergedDoubleWallThicknessM?: number
+}
+
+/**
+ * 对「已是同一 levelIndex + 同一 layer 字符串」的墙段列表，复现双线并查集分组（不含 INSERT 旁路）。
+ * 用于排查厚度 = cMax−cMin 被多线串联放大的情况。
+ */
+export function debugDoubleWallMergeSingleGroup(
+  list: TaggedWallSegment[],
+  opts: MergeDoubleWallLineOpts,
+): DoubleWallMergeComponentDebug[] {
+  const sinEps = Math.sin(0.004)
+  const maxMergedThM =
+    opts.maxMergedDoubleWallThicknessM ?? DEFAULT_DOUBLE_WALL_MAX_MERGED_THICKNESS_M
+  const mergeableList: TaggedWallSegment[] = []
+  const origIndex: number[] = []
+  for (let i = 0; i < list.length; i++) {
+    if (list[i]!.seg.fromInsert) {
+      continue
+    }
+    mergeableList.push(list[i]!)
+    origIndex.push(i)
+  }
+  if (mergeableList.length < 2) {
+    return []
+  }
+
+  const n = mergeableList.length
+  const ms: (MetersSeg | null)[] = mergeableList.map((t) =>
+    toMetersSeg(t.seg, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY),
+  )
+  const uf = new UnionFind(n)
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const ai = ms[i]
+      const bj = ms[j]
+      if (!ai || !bj) {
+        continue
+      }
+      if (
+        mergeablePair(
+          ai,
+          bj,
+          opts.minDoubleSpacingM,
+          opts.maxDoubleSpacingM,
+          opts.minOverlapM,
+          sinEps,
+          opts.minLengthRatio,
+        )
+      ) {
+        uf.union(i, j)
+      }
+    }
+  }
+
+  const comp = new Map<number, number[]>()
+  for (let i = 0; i < n; i++) {
+    const r = uf.find(i)
+    const arr = comp.get(r) ?? []
+    arr.push(i)
+    comp.set(r, arr)
+  }
+
+  const out: DoubleWallMergeComponentDebug[] = []
+  for (const [, idxs] of comp) {
+    if (idxs.length < 2) {
+      continue
+    }
+    const ref = ms[idxs[0]!]
+    if (!ref) {
+      continue
+    }
+    const nx = ref.n[0]
+    const ny = ref.n[1]
+    const cPerMember: number[] = []
+    let cMin = Number.POSITIVE_INFINITY
+    let cMax = Number.NEGATIVE_INFINITY
+    for (const ii of idxs) {
+      const m = ms[ii]
+      if (!m) {
+        continue
+      }
+      const ci = dot(m.p0[0], m.p0[1], nx, ny)
+      cPerMember.push(ci)
+      cMin = Math.min(cMin, ci)
+      cMax = Math.max(cMax, ci)
+    }
+    const rawT = cMax - cMin
+    if (rawT > maxMergedThM + 1e-9) {
+      continue
+    }
+    const thicknessM = rawT > 1e-6 ? rawT : opts.defaultThicknessM
+    out.push({
+      memberIndices: idxs.map((ii) => origIndex[ii]!),
+      thicknessM,
+      cMin,
+      cMax,
+      n: [nx, ny],
+      cPerMember,
+    })
+  }
+  return out
+}
+
 /**
  * 两段共线墙在轴向上的端点间隙 ≤ 此值（米）时合并。
- * 门洞处常无双线，立面被拆成多段；默认约 2m 以覆盖常见单扇门洞+门框（仍依赖同条带 + 同图层，避免整层串墙）。
+ * 默认 0.49m，减少跨门洞等宽间隙误并；需更大门洞时 CLI 调大 `--colinear-gap-merge-max-m`。
  */
-export const DEFAULT_COLINEAR_GAP_MERGE_MAX_M = 2.0
+export const DEFAULT_COLINEAR_GAP_MERGE_MAX_M = 0.49
 /** 两段墙平行于同一轴线时，法向偏移 ≤ 此值（米）才视为同一立面（窗洞四条线合并后的中心线漂移等） */
 export const DEFAULT_COLINEAR_GAP_MERGE_PERP_TOL_M = 0.1
 /**
