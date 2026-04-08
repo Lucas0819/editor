@@ -22,6 +22,8 @@ export type {
 export { emitter, eventSuffixes } from './events/bus'
 // Hooks
 export {
+  PASCAL_NODE_ID_KEY,
+  PASCAL_NODE_TYPE_KEY,
   sceneRegistry,
   useRegistry,
 } from './hooks/scene-registry/scene-registry'
@@ -67,6 +69,10 @@ export {
   type WallMiterData,
 } from './systems/wall/wall-mitering'
 export { WallSystem } from './systems/wall/wall-system'
+export {
+  estimateBuildingCenterXZ,
+  getWindowExteriorFlushLocalZ,
+} from './systems/window/window-exterior-offset'
 export { WindowSystem } from './systems/window/window-system'
 export { cloneSceneGraph } from './utils/clone-scene-graph'
 export { isObject } from './utils/types'

@@ -200,7 +200,9 @@ export function SettingsPanel({
     }
   }, [])
 
-  const isLocalProject = false // Props-based; only show cloud sections when projectId provided
+  /** Local / dev ids — hide cloud-only sections (visibility, remote thumbnail). */
+  const isLocalProject =
+    projectId === 'local-editor' || (typeof projectId === 'string' && projectId.startsWith('local-'))
 
   const handleExport = async (format: 'glb' | 'stl' | 'obj' = 'glb') => {
     if (exportScene) {

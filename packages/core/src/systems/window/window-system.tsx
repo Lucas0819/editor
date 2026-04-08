@@ -2,8 +2,9 @@ import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
 import { DoubleSide, MeshStandardNodeMaterial } from 'three/webgpu'
 import { sceneRegistry } from '../../hooks/scene-registry/scene-registry'
-import type { AnyNodeId, WindowNode } from '../../schema'
+import type { AnyNodeId, AnyNode, WallNode, WindowNode } from '../../schema'
 import useScene from '../../store/use-scene'
+import { getWindowExteriorFlushLocalZ } from './window-exterior-offset'
 
 const glassMaterial = new MeshStandardNodeMaterial({
   name: 'glass',
@@ -76,8 +77,19 @@ function updateWindowMesh(node: WindowNode, mesh: THREE.Mesh) {
   mesh.geometry = new THREE.BoxGeometry(node.width, node.height, node.frameDepth)
   mesh.material = hitboxMaterial
 
+  const nodes = useScene.getState().nodes as Record<string, AnyNode>
+  const wall = node.parentId ? (nodes[node.parentId] as WallNode | undefined) : undefined
+  const zFlush =
+    wall?.type === 'wall'
+      ? getWindowExteriorFlushLocalZ(
+          wall,
+          node,
+          nodes as Record<string, { type?: string; start?: [number, number]; end?: [number, number] }>,
+        )
+      : 0
+
   // Sync transform from node (React may lag behind the system by a frame during drag)
-  mesh.position.set(node.position[0], node.position[1], node.position[2])
+  mesh.position.set(node.position[0], node.position[1], node.position[2] + zFlush)
   mesh.rotation.set(node.rotation[0], node.rotation[1], node.rotation[2])
 
   // Dispose and remove all old visual children; preserve 'cutout'

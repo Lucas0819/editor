@@ -7,6 +7,7 @@ import * as THREE from 'three'
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js'
+import { prepareObject3DForGltfExport } from '../../lib/gltf-export-prepare'
 import useViewer from '../../store/use-viewer'
 
 const EDITOR_LAYER = 1 // same constant used across the editor
@@ -42,6 +43,8 @@ export const ExportSystem = () => {
       for (const obj of toRemove) {
         obj.parent?.remove(obj)
       }
+
+      prepareObject3DForGltfExport(exportRoot)
 
       if (format === 'glb') {
         const exporter = new GLTFExporter()
