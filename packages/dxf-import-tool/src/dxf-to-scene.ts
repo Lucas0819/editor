@@ -325,6 +325,26 @@ function bboxFromSegments(
   return { minX, maxX, minY, maxY }
 }
 
+/** 将点并入轴对齐包围盒（用于合并合成短墙端点）。 */
+function expandBBoxWithPoint(
+  bb: { minX: number; maxX: number; minY: number; maxY: number } | null,
+  x: number,
+  y: number,
+): { minX: number; maxX: number; minY: number; maxY: number } | null {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return bb
+  }
+  if (bb === null) {
+    return { minX: x, maxX: x, minY: y, maxY: y }
+  }
+  return {
+    minX: Math.min(bb.minX, x),
+    maxX: Math.max(bb.maxX, x),
+    minY: Math.min(bb.minY, y),
+    maxY: Math.max(bb.maxY, y),
+  }
+}
+
 function buildSceneGraph(
   segments: PlanSegment[],
   header: { insUnits: number; extMin: { x: number; y: number; z: number } },
@@ -514,29 +534,6 @@ function buildSceneGraph(
     byLevel.set(0, [])
   }
 
-  const bb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, pl)
-  const margin = 2
-  const polygon =
-    bb === null
-      ? {
-          type: 'polygon' as const,
-          points: [
-            [-15, -15],
-            [15, -15],
-            [15, 15],
-            [-15, 15],
-          ],
-        }
-      : {
-          type: 'polygon' as const,
-          points: [
-            [bb.minX - margin, bb.minY - margin],
-            [bb.maxX + margin, bb.minY - margin],
-            [bb.maxX + margin, bb.maxY + margin],
-            [bb.minX - margin, bb.maxY + margin],
-          ],
-        }
-
   const nameSeq = createExportNameCounter()
 
   const nodes: Record<string, unknown> = {}
@@ -646,6 +643,41 @@ function buildSceneGraph(
     }
   }
 
+  /** 最终墙段 + 门窗合成短墙端点 → 包围盒；平面原点取该盒中心（与 EXTMIN 偏移后坐标系一致）。 */
+  let rawBb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, pl)
+  for (const r of openingResolved) {
+    if (r.mode === 'synthetic') {
+      rawBb = expandBBoxWithPoint(rawBb, r.start[0], r.start[1])
+      rawBb = expandBBoxWithPoint(rawBb, r.end[0], r.end[1])
+    }
+  }
+  const planeCenterX = rawBb === null ? 0 : (rawBb.minX + rawBb.maxX) / 2
+  const planeCenterY = rawBb === null ? 0 : (rawBb.minY + rawBb.maxY) / 2
+  siteMeta.planeOrigin = 'building_bbox_center'
+  siteMeta.planeOriginCenterM = [planeCenterX, planeCenterY]
+
+  const margin = 2
+  const polygon =
+    rawBb === null
+      ? {
+          type: 'polygon' as const,
+          points: [
+            [-15, -15],
+            [15, -15],
+            [15, 15],
+            [-15, 15],
+          ],
+        }
+      : {
+          type: 'polygon' as const,
+          points: [
+            [rawBb.minX - margin - planeCenterX, rawBb.minY - margin - planeCenterY],
+            [rawBb.maxX + margin - planeCenterX, rawBb.minY - margin - planeCenterY],
+            [rawBb.maxX + margin - planeCenterX, rawBb.maxY + margin - planeCenterY],
+            [rawBb.minX - margin - planeCenterX, rawBb.maxY + margin - planeCenterY],
+          ],
+        }
+
   /** 单层：墙段与合成短墙端点在平面上的包围盒，用于生成该层整块楼板（轴对齐矩形）。 */
   function bboxForLevelWallEndpoints(
     li: number,
@@ -702,7 +734,12 @@ function buildSceneGraph(
     if (!Number.isFinite(minX)) {
       return null
     }
-    return { minX, maxX, minY, maxY }
+    return {
+      minX: minX - planeCenterX,
+      maxX: maxX - planeCenterX,
+      minY: minY - planeCenterY,
+      maxY: maxY - planeCenterY,
+    }
   }
 
   /** polygon 为 [x,z]；与墙 start/end 同一平面。略扩边以覆盖墙厚。 */
@@ -790,7 +827,7 @@ function buildSceneGraph(
     }
     const wallIds: string[] = []
     for (const { seg: s, mapping, thicknessM, fromDoubleLineMerge } of segs) {
-      const [sx, sy] = transformDxfPointForLevel(
+      const [sx0, sy0] = transformDxfPointForLevel(
         s.x0,
         s.y0,
         li,
@@ -803,7 +840,7 @@ function buildSceneGraph(
         opts.flipY,
         pl,
       )
-      const [ex, ey] = transformDxfPointForLevel(
+      const [ex0, ey0] = transformDxfPointForLevel(
         s.x1,
         s.y1,
         li,
@@ -816,6 +853,10 @@ function buildSceneGraph(
         opts.flipY,
         pl,
       )
+      const sx = sx0 - planeCenterX
+      const sy = sy0 - planeCenterY
+      const ex = ex0 - planeCenterX
+      const ey = ey0 - planeCenterY
       const wid = nid('wall')
       wallIds.push(wid)
       const baseLabel = displayNameForNode(s.layer, mapping)
@@ -892,8 +933,10 @@ function buildSceneGraph(
       }
     }
     for (const syn of syntheticByLevel.get(li) ?? []) {
-      const [sx, sy] = syn.start
-      const [ex, ey] = syn.end
+      const sx = syn.start[0] - planeCenterX
+      const sy = syn.start[1] - planeCenterY
+      const ex = syn.end[0] - planeCenterX
+      const ey = syn.end[1] - planeCenterY
       const wid = nid('wall')
       wallIds.push(wid)
       const baseLabel = displayNameForNode(syn.layer, syn.mapping)
