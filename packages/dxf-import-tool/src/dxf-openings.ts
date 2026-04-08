@@ -7,9 +7,10 @@ import {
   inverseTransformDxfPointForLevel,
   resolveLayerMapping,
   resolveLevelIndexForDxfRawPoint,
+  resolveLevelIndexForDxfRawSegment,
   transformDxfPointForLevel,
 } from './dxf-layer-mapping.ts'
-import type { PlanInsert } from './parse-dxf-entities.ts'
+import type { PlanInsert, PlanSegment } from './parse-dxf-entities.ts'
 
 export type OpeningKind = 'window' | 'door'
 
@@ -344,7 +345,10 @@ const ATTACH_ANGLE_ALIGN_WEIGHT_M = 0.55
  */
 const T_SEGMENT_LO = -0.02
 const T_SEGMENT_HI = 1.02
-/** 合成短墙：到最近墙段（有限线段）的距离上限 */
+/**
+ * 合成短墙：门 INSERT 可沿用「最近墙段」的厚度时，到该墙段（有限线段）的距离上限。
+ * 窗未挂接时不再沿用邻近墙厚度，见 `matchOpeningsToWalls` 中「窗 → 独立短墙」分支。
+ */
 const TOL_NEAREST_SEGMENT = 0.55
 /**
  * 窗（WIN2D）：洞口宽度方向与墙段切向的余弦绝对值低于此值则不挂接到该墙（避免水平窗符号贴到竖向结构墙中心线）。
@@ -865,10 +869,20 @@ export function matchOpeningsToWalls(
     }
 
     const half = widthM / 2
+    /** 墙段中心线 = 洞口宽度方向上的 [−widthM/2, +widthM/2]，墙长与窗宽一致 */
     const start: [number, number] = [px - ux * half, pz - uz * half]
     const end: [number, number] = [px + ux * half, pz + uz * half]
 
-    if (bestLine && bestLine.len > 1e-6 && bestLine.dist < TOL_NEAREST_SEGMENT) {
+    /**
+     * 门：若仍靠近某条墙段，合成短墙可沿用该段厚度（立面一致）。
+     * 窗：未挂接到任何墙段时一律自行生成短墙（默认厚度），并嵌入与墙段等长的窗（width = widthM），不借用邻近墙厚度。
+     */
+    if (
+      kind === 'door' &&
+      bestLine &&
+      bestLine.len > 1e-6 &&
+      bestLine.dist < TOL_NEAREST_SEGMENT
+    ) {
       const wp = flatWallPieces[bestLine.wi]!
       out.push({
         mode: 'synthetic',
@@ -914,6 +928,160 @@ export function matchOpeningsToWalls(
 
   const attachOnly = out.filter((r): r is OpeningAttach => r.mode === 'attach')
   extendWallPiecesForAttachmentOpenings(flatWallPieces, attachOnly, baseOpts)
+
+  return out
+}
+
+/** 窗层线段中点与已有 INSERT 门窗场景位置过近则跳过，避免「块 + 线」重复生成 */
+const DEDUPE_WINDOW_LINE_VS_INSERT_M = 0.35
+
+function collectOpeningInsertScenePoints(
+  resolved: OpeningResolved[],
+  flatWallPieces: WallPieceForOpenings[],
+  opts: OpeningTransformOpts,
+): [number, number][] {
+  const pts: [number, number][] = []
+  for (const r of resolved) {
+    if (r.mode === 'attach') {
+      const wi = r.wallIndex
+      const wp = flatWallPieces[wi]
+      if (!wp) {
+        continue
+      }
+      const li = wp.levelIndex
+      pts.push(tpScene(r.insert.bx, r.insert.by, li, opts))
+    } else {
+      pts.push([(r.start[0] + r.end[0]) / 2, (r.start[1] + r.end[1]) / 2])
+    }
+  }
+  return pts
+}
+
+/**
+ * 将映射为 `window` 的图层上的 LINE/LWPOLYLINE 转为「短墙 + 窗」：无 WIN2D INSERT 时原逻辑完全忽略这些线。
+ * 墙长 = 线段长，窗宽 = 同值；若线段中点与已有门窗 INSERT 合成结果过近则跳过（防重复）。
+ */
+export function syntheticWindowsFromWindowLayerLineSegments(
+  segments: PlanSegment[],
+  openingResolved: OpeningResolved[],
+  flatWallPieces: WallPieceForOpenings[],
+  opts: {
+    ox: number
+    oy: number
+    scale: number
+    offset: boolean
+    flipX: boolean
+    flipY: boolean
+    layerMapping: ParsedDxfLayerMappingFile | null
+    floorPlan: DxfFloorPlan | null
+    perLevelAnchor: Map<number, number> | null
+    minLenM: number
+    defaultWallThicknessM: number
+    /** 防止异常图纸刷爆；0 表示用内置上限 */
+    maxWindowLineSynthetics: number
+  },
+): OpeningSynthetic[] {
+  const baseOpts: OpeningTransformOpts = {
+    ox: opts.ox,
+    oy: opts.oy,
+    scale: opts.scale,
+    offset: opts.offset,
+    flipX: opts.flipX,
+    flipY: opts.flipY,
+    floorPlan: opts.floorPlan ?? null,
+    perLevelAnchor: opts.perLevelAnchor ?? null,
+  }
+
+  const maxCap =
+    opts.maxWindowLineSynthetics > 0 ? opts.maxWindowLineSynthetics : 5000
+
+  const taken = collectOpeningInsertScenePoints(openingResolved, flatWallPieces, baseOpts)
+  const out: OpeningSynthetic[] = []
+
+  for (const s of segments) {
+    if (out.length >= maxCap) {
+      break
+    }
+    const mapping = resolveLayerMapping(s.layer, opts.layerMapping?.map ?? null)
+    if (mapping.target.kind !== 'window') {
+      continue
+    }
+
+    const li = resolveLevelIndexForDxfRawSegment(s.x0, s.y0, s.x1, s.y1, opts.floorPlan)
+    const [sx0, sy0] = transformDxfPointForLevel(
+      s.x0,
+      s.y0,
+      li,
+      opts.floorPlan,
+      opts.ox,
+      opts.oy,
+      opts.scale,
+      opts.offset,
+      opts.flipX,
+      opts.flipY,
+      opts.perLevelAnchor ?? null,
+    )
+    const [sx1, sy1] = transformDxfPointForLevel(
+      s.x1,
+      s.y1,
+      li,
+      opts.floorPlan,
+      opts.ox,
+      opts.oy,
+      opts.scale,
+      opts.offset,
+      opts.flipX,
+      opts.flipY,
+      opts.perLevelAnchor ?? null,
+    )
+    const widthM = Math.hypot(sx1 - sx0, sy1 - sy0)
+    if (widthM < opts.minLenM) {
+      continue
+    }
+
+    const mx = (sx0 + sx1) / 2
+    const my = (sy0 + sy1) / 2
+    if (
+      taken.some(([ex, ey]) => Math.hypot(ex - mx, ey - my) < DEDUPE_WINDOW_LINE_VS_INSERT_M)
+    ) {
+      continue
+    }
+    taken.push([mx, my])
+
+    const refWall = flatWallPieces.find((w) => w.levelIndex === li)
+    const layer = refWall?.seg.layer ?? s.layer
+    const mapWall = refWall?.mapping ?? resolveLayerMapping('A-WALL', opts.layerMapping?.map ?? null)
+
+    const dx = s.x1 - s.x0
+    const dy = s.y1 - s.y0
+    const widthDxf = Math.max(Math.hypot(dx, dy), 1e-9)
+    const rotationDeg = (Math.atan2(dy, dx) * 180) / Math.PI
+
+    const dummyInsert: PlanInsert = {
+      layer: s.layer,
+      blockName: 'DXF_LINE_WINDOW',
+      bx: (s.x0 + s.x1) / 2,
+      by: (s.y0 + s.y1) / 2,
+      sx: widthDxf,
+      sy: 0.0001,
+      sz: 1,
+      rotationDeg,
+    }
+
+    out.push({
+      mode: 'synthetic',
+      kind: 'window',
+      widthM,
+      levelIndex: li,
+      thicknessM: opts.defaultWallThicknessM,
+      layer,
+      mapping: mapWall,
+      fromDoubleLineMerge: false,
+      start: [sx0, sy0],
+      end: [sx1, sy1],
+      insert: dummyInsert,
+    })
+  }
 
   return out
 }

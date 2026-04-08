@@ -45,6 +45,7 @@ import {
   matchOpeningsToWalls,
   type OpeningAttach,
   type OpeningSynthetic,
+  syntheticWindowsFromWindowLayerLineSegments,
 } from './dxf-openings.ts'
 import {
   baseDxfMetadata,
@@ -118,6 +119,8 @@ function parseArgs(argv: string[]) {
   let redundantStubMaxLenM = 0.4
   /** 长墙最短长度（米），短肢相对其判断 */
   let redundantStubLongMinLenM = 2.0
+  /** 0：使用内置上限（5000）；将窗图层线段转为短墙+窗 */
+  let maxWindowLineSynthetics = 0
 
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]
@@ -216,6 +219,11 @@ function parseArgs(argv: string[]) {
       if (Number.isFinite(v) && v >= 0.5 && v <= 20) {
         redundantStubLongMinLenM = v
       }
+    } else if (a === '--max-window-line-synthetics') {
+      const v = Number.parseInt(argv[++i] ?? '', 10)
+      if (Number.isFinite(v) && v >= 0) {
+        maxWindowLineSynthetics = v
+      }
     }
   }
 
@@ -247,6 +255,7 @@ function parseArgs(argv: string[]) {
     colinearGapMergeGeneralDirection,
     redundantStubMaxLenM,
     redundantStubLongMinLenM,
+    maxWindowLineSynthetics,
   }
 }
 
@@ -391,6 +400,8 @@ function buildSceneGraph(
     inserts: PlanInsert[]
     /** 各层分割轴锚点（与 `computePerLevelSplitAxisAnchorFromGeometry`） */
     perLevelAnchor: Map<number, number> | null
+    /** 0：仅内置上限；将窗图层线段转为短墙+窗的最大条数 */
+    maxWindowLineSynthetics: number
   },
 ): SceneGraph {
   const scale = opts.scaleOverride ?? insUnitsToMetersFactor(header.insUnits)
@@ -645,13 +656,38 @@ function buildSceneGraph(
         })
       : []
 
-  if (openingResolved.length > 0) {
+  const lineWindowSynthetics = syntheticWindowsFromWindowLayerLineSegments(
+    segments,
+    openingResolved,
+    flatWallPieces,
+    {
+      ox,
+      oy,
+      scale,
+      offset: opts.offset,
+      flipX: opts.flipX,
+      flipY: opts.flipY,
+      layerMapping: opts.layerMapping,
+      floorPlan: fp,
+      perLevelAnchor: pl,
+      minLenM: opts.minLenM,
+      defaultWallThicknessM: opts.wallThickness,
+      maxWindowLineSynthetics: opts.maxWindowLineSynthetics,
+    },
+  )
+
+  const allOpeningResolved = [...openingResolved, ...lineWindowSynthetics]
+
+  if (openingResolved.length > 0 || lineWindowSynthetics.length > 0) {
     siteMeta.dxfOpeningResolved = openingResolved.length
     siteMeta.dxfOpeningAttach = openingResolved.filter((r) => r.mode === 'attach').length
-    siteMeta.dxfOpeningSyntheticWalls = openingResolved.filter((r) => r.mode === 'synthetic').length
+    siteMeta.dxfOpeningSyntheticWalls = allOpeningResolved.filter((r) => r.mode === 'synthetic').length
+    if (lineWindowSynthetics.length > 0) {
+      siteMeta.dxfWindowLayerLineSynthetics = lineWindowSynthetics.length
+    }
   }
 
-  const syntheticOpeningWallCount = openingResolved.filter((r) => r.mode === 'synthetic').length
+  const syntheticOpeningWallCount = allOpeningResolved.filter((r) => r.mode === 'synthetic').length
   siteMeta.wallPipelineTaggedSegments = taggedWallSegmentCount
   siteMeta.wallPipelinePiecesAfterDoubleMerge = wallPiecesAfterDoubleMerge
   siteMeta.wallPipelinePiecesAfterColinearGap = wallPiecesAfterColinearGap
@@ -668,7 +704,7 @@ function buildSceneGraph(
   const attachList = openingResolved.filter((r): r is OpeningAttach => r.mode === 'attach')
   const attachByWall = groupAttachByWallIndex(attachList)
   const syntheticByLevel = new Map<number, OpeningSynthetic[]>()
-  for (const r of openingResolved) {
+  for (const r of allOpeningResolved) {
     if (r.mode === 'synthetic') {
       const list = syntheticByLevel.get(r.levelIndex) ?? []
       list.push(r)
@@ -678,7 +714,7 @@ function buildSceneGraph(
 
   /** 最终墙段 + 门窗合成短墙端点 → 包围盒；平面原点取该盒中心（与 EXTMIN 偏移后坐标系一致）。 */
   let rawBb = bboxFromSegments(usedSegs, ox, oy, scale, opts.offset, opts.flipX, opts.flipY, fp, pl)
-  for (const r of openingResolved) {
+  for (const r of allOpeningResolved) {
     if (r.mode === 'synthetic') {
       rawBb = expandBBoxWithPoint(rawBb, r.start[0], r.start[1])
       rawBb = expandBBoxWithPoint(rawBb, r.end[0], r.end[1])
@@ -1089,10 +1125,15 @@ function buildSceneGraph(
       `Merged double wall lines: ${mergeStats.sourceSegmentsMerged} segment(s) → ${mergeStats.sourceSegmentsMerged - mergeStats.wallsReduced} wall(s) (−${mergeStats.wallsReduced})`,
     )
   }
-  if (openingResolved.length > 0) {
+  if (allOpeningResolved.length > 0) {
     const a = openingResolved.filter((r) => r.mode === 'attach').length
-    const s = openingResolved.filter((r) => r.mode === 'synthetic').length
-    console.error(`Openings resolved: ${openingResolved.length} (on-wall ${a}, synthetic short walls ${s})`)
+    const s = allOpeningResolved.filter((r) => r.mode === 'synthetic').length
+    const lw = lineWindowSynthetics.length
+    console.error(
+      `Openings resolved: ${openingResolved.length} from INSERT (on-wall ${a}, synthetic ${openingResolved.filter((r) => r.mode === 'synthetic').length})` +
+        (lw > 0 ? `; + ${lw} from window-layer lines` : '') +
+        ` | total synthetic short walls: ${s}`,
+    )
   }
 
   return { nodes, rootNodeIds: [siteId] }
@@ -1198,6 +1239,7 @@ async function main() {
     redundantStubLongMinLenM: args.redundantStubLongMinLenM,
     inserts,
     perLevelAnchor,
+    maxWindowLineSynthetics: args.maxWindowLineSynthetics,
   })
 
   const wallCount = Object.keys(scene.nodes).filter(
