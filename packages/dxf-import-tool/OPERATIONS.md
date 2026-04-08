@@ -9,6 +9,31 @@
 - 仓库根目录已安装 [Bun](https://bun.sh)。
 - 无需额外 `npm install`（本工具无第三方依赖）。
 
+## 预读（转换前）
+
+在跑 `dxf-to-scene` 之前，可用 CLI 对图纸做**统计与抽样**（图层表、墙段长度分位数、门窗 INSERT 各若干条），供与用户确认 mapping 与参数。输出为 **JSON**（stdout 重定向即可）：
+
+**方式 A（推荐，Skill 内脚本，自动定位仓库根）：**
+
+```bash
+bash /path/to/editor/.cursor/skills/dxf-import-conversational/scripts/dxf-preview.sh \
+  --input "/path/to/图纸.dxf" \
+  [--mapping-file "/path/to/layer-mapping.json"] \
+  [--sample 10]
+```
+
+**方式 B（直接调包内入口）：**
+
+```bash
+bun run /path/to/editor/packages/dxf-import-tool/src/dxf-preview.ts \
+  --input "/path/to/图纸.dxf" \
+  [--mapping-file "/path/to/layer-mapping.json"] \
+  [--sample 10]
+```
+
+- `--sample`：每类（门 INSERT、窗 INSERT、映射为墙之线段）最多抽样条数，默认 `10`。  
+- 与 **`.cursor/skills/dxf-import-conversational/SKILL.md`** 配合时，Agent 可先执行 **方式 A** 再进入确认流程；stdout 为 JSON，供 Claude Code 解析并整理参数建议。
+
 ## 命令
 
 在任意目录执行均可，建议使用**绝对路径**指向 DXF 与输出 JSON。

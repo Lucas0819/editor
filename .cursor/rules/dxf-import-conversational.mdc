@@ -1,0 +1,22 @@
+---
+description: >-
+  DXF 交互式导入：dxf-preview 预读、确认 mapping 与 CLI、dxf-to-scene、输出 JSON；
+  可选浏览器预览（先检测 3002 再决定是否 bun dev）。用户附 .dxf 或提到
+  dxf-import-tool / mapping / 预读 / 预览时使用。
+globs: "**/*.dxf,packages/dxf-import-tool/**"
+alwaysApply: false
+---
+
+# DXF 交互式导入（须先读 Skill）
+
+当用户**提供 DXF 路径**或要做 **DXF→scene JSON** 且需要**确认 mapping 与参数**时：
+
+1. **先应用** Cursor skill：`.cursor/skills/dxf-import-conversational/SKILL.md`（按其中顺序执行：预读 → 确认 mapping → 再预读/建议 CLI → 确认 → `dxf-to-scene` → **询问是否预览**；若预览则检测 **3002** 未占用再 `bun dev`，已占用则勿重复启动）。
+
+2. **预读命令**（事实来源；优先 Skill 内脚本）  
+   `bash .cursor/skills/dxf-import-conversational/scripts/dxf-preview.sh --input "<绝对路径>" [--mapping-file "<json>"] [--sample 10]`  
+   等价：`bun run packages/dxf-import-tool/src/dxf-preview.ts …`（stdout 为 JSON，由 Agent 解析）
+
+3. **图层 JSON** 仍遵循 `packages/dxf-import-tool/AGENT_LAYER_MAPPING_PROMPT.md`；可与 `dxf-layer-mapping-agent` 规则一起用。
+
+4. **参数说明** 以 `packages/dxf-import-tool/OPERATIONS.md` 为准；**未经用户确认不得执行** `src/dxf-to-scene.ts`。

@@ -349,3 +349,49 @@ export function parseDxfPlanSegments(text: string): {
 
   return { header, segments, inserts }
 }
+
+/**
+ * 从 `TABLES` → `LAYER` 表提取全部图层名（去重，顺序不保证）。
+ */
+export function parseDxfLayerTableNames(text: string): string[] {
+  const lines = text.split(/\r?\n/)
+  const secStart = findSection(lines, 'TABLES')
+  if (secStart < 0) {
+    return []
+  }
+  let i = secStart
+  let inLayerTable = false
+  const names: string[] = []
+  while (i < lines.length - 1) {
+    const code = Number(lines[i])
+    const val = trimPair(lines[i + 1])
+    if (code === 0 && val === 'ENDSEC') {
+      break
+    }
+    if (code === 0 && val === 'ENDTAB') {
+      inLayerTable = false
+      i += 2
+      continue
+    }
+    if (code === 0 && val === 'TABLE') {
+      i += 2
+      if (i < lines.length - 1 && Number(lines[i]) === 2) {
+        inLayerTable = trimPair(lines[i + 1]) === 'LAYER'
+      } else {
+        inLayerTable = false
+      }
+      i += 2
+      continue
+    }
+    if (inLayerTable && code === 100 && val === 'AcDbLayerTableRecord') {
+      i += 2
+      if (i < lines.length - 1 && Number(lines[i]) === 2) {
+        names.push(trimPair(lines[i + 1]))
+        i += 2
+        continue
+      }
+    }
+    i += 2
+  }
+  return [...new Set(names)]
+}

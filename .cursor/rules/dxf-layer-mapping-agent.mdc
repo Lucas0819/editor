@@ -1,0 +1,28 @@
+---
+description: >-
+  DXF 图层映射与楼层预处理：layer-mapping、floorPlan、AGENT_LAYER_MAPPING、dxf 预处理、
+  mapping JSON、分析图层表、多楼层分带。与 dxf-import-tool 或 *.dxf 相关时使用。
+globs: "**/*.dxf,packages/dxf-import-tool/**"
+alwaysApply: false
+---
+
+# DXF → layer-mapping（Agent 预处理）
+
+当用户要做 **DXF 预处理**、**生成 mapping JSON**、**按图层归类**、**填写 floorPlan / 楼层范围** 时：
+
+若用户需要 **先预读、确认 mapping、再建议 CLI、最后执行转换**，优先遵循 **`.cursor/skills/dxf-import-conversational/SKILL.md`**（并运行 `src/dxf-preview.ts`）。
+
+1. **先完整阅读**（必要时用工具读取）  
+   `packages/dxf-import-tool/AGENT_LAYER_MAPPING_PROMPT.md`  
+   按其中的步骤与输出格式执行，不要省略 `floorPlan` 与 `layers` 的约定。
+
+2. **输出结构**对齐  
+   `packages/dxf-import-tool/layer-mapping.example.json`（根级含 `version`、`layers`；可选 `floorPlan`、`layerAnalysis`）。
+
+3. **能力边界**（向用户说明时保持准确）  
+   - `dxf-to-scene --mapping-file` **会消费** `layers`；若 JSON 含 **`floorPlan`**，也会用于分楼层与 `site.metadata.dxfFloorPlan`。  
+   - **工程专名**的 `layer-mapping.*.json` 应由 **AGENT_LAYER_MAPPING_PROMPT** 流程生成，**不要**在仓库里手写改键；缺层或改语义时**重新跑 Agent** 对照 DXF。
+
+4. **DXF 过大**时：优先解析 `TABLE`→`LAYER` 列出图层名；再在 `ENTITIES` 中搜 `TEXT` / 用户给出的楼层标题层（如 `楼层名称`），用于推断 `floorPlan.levels` 的 `range`。
+
+5. 用户若只给**关键词**（如「按 prompt 做 DXF mapping」），视为引用本规则 + 上述 `AGENT_LAYER_MAPPING_PROMPT.md`，无需用户重复粘贴全文。

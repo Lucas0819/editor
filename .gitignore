@@ -39,8 +39,11 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Local CAD drawings (development only)
-*.dxf
+# Root-level CAD exports and scene JSON (development only; keep package manifests)
+/*.dxf
+/*.json
+!/package.json
+!/turbo.json
 
 # Misc
 .DS_Store

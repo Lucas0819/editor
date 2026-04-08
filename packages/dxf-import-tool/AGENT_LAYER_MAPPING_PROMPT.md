@@ -97,15 +97,20 @@
 
 ## 与 Cursor / Claude 的集成（如何「给关键词就自动读」）
 
-1. **Cursor 项目规则（本仓库已加）**  
+1. **交互式整流程（推荐）**  
+   若用户要**先确认再转换**（预读 mapping、可改、再建议 CLI、最后执行 `dxf-to-scene`）：使用 Cursor skill **`.cursor/skills/dxf-import-conversational/SKILL.md`**，并配合预读脚本 **`src/dxf-preview.ts`**（见 `OPERATIONS.md`「预读」小节）。Skill 会要求 Agent 先跑 `dxf-preview` 再与用户确认。
+
+2. **Cursor 项目规则（本仓库已加）**  
    文件：`.cursor/rules/dxf-layer-mapping-agent.mdc`（`description` 里含 *layer-mapping、floorPlan、DXF 预处理* 等词；`globs` 含 `**/*.dxf` 与 `packages/dxf-import-tool/**`）。  
    当你打开 DXF 或编辑 `dxf-import-tool` 下的文件，并提到「mapping / 预处理 / 楼层 / floorPlan」时，Agent 更容易自动带上该规则；规则内要求先读 **本文件** `AGENT_LAYER_MAPPING_PROMPT.md`。
 
-2. **仍建议显式 @ 文件**  
+   另：**`.cursor/rules/dxf-import-conversational.mdc`** 覆盖「预读 → 双次确认 → 执行转换」；与上条可同时命中。
+
+3. **仍建议显式 @ 文件**  
    在对话里输入 `@packages/dxf-import-tool/AGENT_LAYER_MAPPING_PROMPT.md`（或 `@Drawing5.dxf`），可避免漏上下文。
 
-3. **Claude Code**  
-   同规则已链到 `.claude/rules/dxf-layer-mapping-agent.md`，行为与上类似。
+4. **Claude Code**  
+   在仓库根目录为 `.claude/rules/` 建立指向 `.cursor/rules/*.mdc` 的 symlink（见 `.cursor/rules/creating-rules.mdc`），即可与本仓库 Cursor 规则对齐。
 
-4. **网页 Claude（无仓库时）**  
+5. **网页 Claude（无仓库时）**  
    将本 `AGENT_LAYER_MAPPING_PROMPT.md` 全文放进 **Project instructions** 或 **Project knowledge**，自定义说明里写一句：「用户说 DXF mapping / 图层预处理 时按该文档执行」。
