@@ -1,13 +1,6 @@
----
-name: dxf-import-conversational
-description: >-
-  引导用户完成 DXF→Pascal 场景 JSON：预读（dxf-preview.sh）、确认 mapping 与 CLI、
-  执行 dxf-to-scene；生成 JSON 后询问是否浏览器预览，按需检测 3002 端口并启动
-  bun dev。适用于用户提供 .dxf、dxf-import-tool、mapping、图层预处理、floorPlan、
-  或「确认后再转换 / 预览」时。
----
+# DXF 交互式导入（Claude Code / slash command）
 
-# DXF 交互式导入（Cursor / Claude Code）
+与 `.cursor/skills/dxf-import-conversational/SKILL.md` **同源**；维护时请两处一起改。下文 `--input "$ARGUMENTS"` 为 slash command 注入的 DXF 路径（或用户消息中的路径）。
 
 ## 目标
 
@@ -19,14 +12,14 @@ description: >-
 
 ```bash
 bash .cursor/skills/dxf-import-conversational/scripts/dxf-preview.sh \
-  --input "/绝对路径/图.dxf" --sample 10
+  --input "$ARGUMENTS" --sample 10
 ```
 
 若用户已有一份 mapping 草案：
 
 ```bash
 bash .cursor/skills/dxf-import-conversational/scripts/dxf-preview.sh \
-  --input "/绝对路径/图.dxf" \
+  --input "$ARGUMENTS" \
   --mapping-file "/绝对路径/mapping.json" \
   --sample 10
 ```
@@ -34,7 +27,7 @@ bash .cursor/skills/dxf-import-conversational/scripts/dxf-preview.sh \
 **等价命令**（在仓库根目录）：
 
 ```bash
-bun run packages/dxf-import-tool/src/dxf-preview.ts --input "/绝对路径/图.dxf" --sample 10
+bun run packages/dxf-import-tool/src/dxf-preview.ts --input "$ARGUMENTS" --sample 10
 ```
 
 ### 说明（能力与边界）
@@ -77,8 +70,8 @@ bun run packages/dxf-import-tool/src/dxf-preview.ts --input "/绝对路径/图.d
 
 ```bash
 bun run packages/dxf-import-tool/src/dxf-to-scene.ts \
-  --input "/绝对路径/图.dxf" \
-  --out "/绝对路径/…/apps/editor/public/demos/from-dxf.json" \
+  --input "$ARGUMENTS" \
+  --out "apps/editor/public/demos/from-dxf.json" \
   --mapping-file "/绝对路径/layer-mapping.json" \
   …用户确认的其他参数…
 ```
@@ -133,7 +126,7 @@ cd "/绝对路径/仓库根" && bun dev
 
 **备选**：若用户无法使用 query，再提供 `OPERATIONS.md` 中的 **Console** `fetch` + `localStorage` + `reload` 片段。
 
-若预览时多楼层未竖向分开，首先检查 **JSON 是否含多个 `type: level` 节点**（取决于 mapping 里的 **`floorPlan`** 与 `dxf-to-scene` 导出）；非预览链接问题。可在编辑器工具栏切换 **Level Mode**（Stacked / Exploded 等）。
+若预览时多楼层未竖向分开，首先检查 **JSON 是否含多个 `type: level` 节点**（取决于 mapping 里的 **`floorPlan.levels`** 与 `dxf-to-scene` 导出）；非预览链接问题。可在编辑器工具栏切换 **Level Mode**（Stacked / Exploded 等）。
 
 ## 约束
 
