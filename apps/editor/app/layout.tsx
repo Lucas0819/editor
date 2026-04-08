@@ -2,7 +2,6 @@ import { Agentation } from 'agentation'
 import { GeistPixelSquare } from 'geist/font/pixel'
 import { Barlow } from 'next/font/google'
 import localFont from 'next/font/local'
-import Script from 'next/script'
 import './globals.css'
 
 const geistSans = localFont({
@@ -32,6 +31,7 @@ export default function RootLayout({
       lang="en"
     >
       <head>
+        {/* React Scan：开发时鼠标悬停会显示组件名浮层，不需要时保持注释
         {process.env.NODE_ENV === 'development' && (
           <Script
             crossOrigin="anonymous"
@@ -39,6 +39,7 @@ export default function RootLayout({
             strategy="beforeInteractive"
           />
         )}
+        */}
       </head>
       <body className="font-sans">
         {children}
