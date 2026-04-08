@@ -123,6 +123,11 @@ export const DXF_IMPORT_WINDOW_DEFAULTS = {
   sillThickness: 0.03,
 } as const
 
+/** 与编辑器 `WallNode` / `SlabNode` / layout 示例一致：DXF 导入墙与自动生成楼板共用 */
+export const DXF_IMPORT_WALL_MATERIAL = {
+  preset: 'concrete' as const,
+}
+
 /** 与 `DoorNode` schema 默认一致 */
 export const DXF_IMPORT_DOOR_DEFAULTS = {
   frameThickness: 0.05,

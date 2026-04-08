@@ -51,6 +51,7 @@ import {
   baseDxfMetadata,
   displayNameForNode,
   DXF_IMPORT_DOOR_DEFAULTS,
+  DXF_IMPORT_WALL_MATERIAL,
   DXF_IMPORT_WINDOW_DEFAULTS,
 } from './dxf-scene-nodes.ts'
 import {
@@ -892,6 +893,7 @@ function buildSceneGraph(
         },
         polygon: slabPolygon,
         elevation: 0.05,
+        material: DXF_IMPORT_WALL_MATERIAL,
       }
     }
     const wallIds: string[] = []
@@ -1006,6 +1008,7 @@ function buildSceneGraph(
         height: opts.wallHeight,
         frontSide: 'unknown',
         backSide: 'unknown',
+        material: DXF_IMPORT_WALL_MATERIAL,
       }
     }
     for (const syn of syntheticByLevel.get(li) ?? []) {
@@ -1091,6 +1094,7 @@ function buildSceneGraph(
         height: opts.wallHeight,
         frontSide: 'unknown',
         backSide: 'unknown',
+        material: DXF_IMPORT_WALL_MATERIAL,
       }
     }
     nodes[levelId] = {
