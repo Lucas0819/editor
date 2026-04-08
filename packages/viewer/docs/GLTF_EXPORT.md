@@ -8,7 +8,7 @@
    - **元数据**：从 `useRegistry` 写入的 `pascalNodeId` / `pascalNodeType` 向下遍历，向每个对象写入 `userData.type` 与 `userData.nodeId`（与 `GLTF_EXPORT_USERDATA_KEYS` 一致），`GLTFExporter` 会将其序列化为 **`extras`**。
    - **材质**：将 WebGPU 的 `MeshStandardNodeMaterial`、`MeshBasicNodeMaterial` 等转为 **glTF 导出器兼容** 的 `MeshStandardMaterial` / `MeshBasicMaterial` / `MeshPhysicalMaterial` 等，避免 PBR 与节点材质在 glTF 中丢失或退化。
 
-窗、门相对墙体的外立面偏移由 **`getWindowExteriorFlushLocalZ`**（`@pascal-app/core`）在 **`WindowRenderer` / `WindowSystem`** 中统一计算，使洞口 CSG 与窗框同步，导出 GLB 时从外侧也更容易看到窗框与玻璃。
+窗、门相对墙体的外立面偏移由 **`getWindowExteriorFlushLocalZ`** / **`getDoorExteriorFlushLocalZ`**（底层为 **`getOpeningExteriorFlushLocalZ`**，`@pascal-app/core`）在 **`WindowRenderer` / `WindowSystem`** 与 **`DoorRenderer` / `DoorSystem`** 中统一计算，使洞口 CSG 与框体同步，导出 GLB 时从外侧也更容易看到洞口几何。
 
 ## `extras` 字段（节点）
 

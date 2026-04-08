@@ -1,4 +1,4 @@
-import type { WallNode, WindowNode } from '../../schema'
+import type { DoorNode, WallNode, WindowNode } from '../../schema'
 import { getWallThickness } from '../wall/wall-footprint'
 
 type NodesForCenter = Record<string, { type?: string; start?: [number, number]; end?: [number, number] }>
@@ -22,19 +22,19 @@ export function estimateBuildingCenterXZ(nodes: NodesForCenter): [number, number
 
 /**
  * Extra offset along **parent wall local +Z** (thickness direction) to add to `node.position[2]`.
- * Windows are authored with `position.z === 0` on the wall mid-plane; centering the frame in the
- * wall thickness recesses glass from the exterior façade. Shifting toward the building exterior
- * aligns the outer frame face with the outer wall surface so openings read clearly in opaque
- * viewers and in GLB — and stays consistent with wall CSG cutouts (cutout is a child of the
- * window mesh and moves with it).
+ * Openings are often authored with `position.z === 0` on the wall mid-plane; centering the frame in
+ * the wall thickness recesses glass/panels from the exterior façade. Shifting toward the building
+ * exterior aligns the outer frame face with the outer wall surface so openings read clearly in
+ * opaque viewers and in GLB — and stays consistent with wall CSG cutouts (cutout is a child of the
+ * mesh and moves with it).
  */
-export function getWindowExteriorFlushLocalZ(
+export function getOpeningExteriorFlushLocalZ(
   wall: WallNode,
-  windowNode: WindowNode,
+  frameDepth: number,
   nodes: NodesForCenter,
 ): number {
   const t = getWallThickness(wall)
-  const fd = windowNode.frameDepth
+  const fd = frameDepth
   const gap = Math.max(0, t / 2 - fd / 2)
   const epsilon = 0.002
   const delta = Math.min(0.08, gap + epsilon)
@@ -62,4 +62,20 @@ export function getWindowExteriorFlushLocalZ(
   const align = lx * hx + lz * hz
   const sign = align >= 0 ? 1 : -1
   return sign * delta
+}
+
+export function getWindowExteriorFlushLocalZ(
+  wall: WallNode,
+  windowNode: WindowNode,
+  nodes: NodesForCenter,
+): number {
+  return getOpeningExteriorFlushLocalZ(wall, windowNode.frameDepth, nodes)
+}
+
+export function getDoorExteriorFlushLocalZ(
+  wall: WallNode,
+  doorNode: DoorNode,
+  nodes: NodesForCenter,
+): number {
+  return getOpeningExteriorFlushLocalZ(wall, doorNode.frameDepth, nodes)
 }

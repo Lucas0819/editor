@@ -71,6 +71,8 @@ export {
 export { WallSystem } from './systems/wall/wall-system'
 export {
   estimateBuildingCenterXZ,
+  getDoorExteriorFlushLocalZ,
+  getOpeningExteriorFlushLocalZ,
   getWindowExteriorFlushLocalZ,
 } from './systems/window/window-exterior-offset'
 export { WindowSystem } from './systems/window/window-system'
