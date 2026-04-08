@@ -1024,3 +1024,125 @@ export function removeRedundantCornerStubs(
   const merged = items.filter((_, i) => !remove.has(i)).map((x) => x.w)
   return { merged, stubsRemoved: remove.size }
 }
+
+/**
+ * 与较长墙段近乎平行、法向距离很小，且轴向投影区间落在长段内的**较短**段（常见于柱/厚墙双线旁多出的中线）。
+ * 与 {@link removeRedundantCornerStubs}（仅删 ≤0.4m 且与长墙近乎垂直的墙角肢）互补。
+ */
+export const DEFAULT_CONTAINED_PARALLEL_FRAG_MAX_NORMAL_SEP_M = 0.2
+export const DEFAULT_CONTAINED_PARALLEL_FRAG_AXIS_TOL_M = 0.08
+
+export function removeContainedParallelFragments(
+  pieces: MergedWallSegment[],
+  opts: {
+    ox: number
+    oy: number
+    scale: number
+    offset: boolean
+    flipX: boolean
+    flipY: boolean
+    maxNormalSepM?: number
+    axisContainTolM?: number
+    axisAlignRad?: number
+  },
+): { merged: MergedWallSegment[]; removed: number } {
+  const maxNormalSepM = opts.maxNormalSepM ?? DEFAULT_CONTAINED_PARALLEL_FRAG_MAX_NORMAL_SEP_M
+  const axisContainTolM = opts.axisContainTolM ?? DEFAULT_CONTAINED_PARALLEL_FRAG_AXIS_TOL_M
+  const axisAlignRad = opts.axisAlignRad ?? DEFAULT_COLINEAR_GAP_AXIS_ALIGN_RAD
+  const sinAxis = Math.sin(axisAlignRad)
+  const stripGroupWidthM = 0.25
+
+  type AxisSeg = {
+    idx: number
+    len: number
+    /** 竖直：xMid；水平：yMid */
+    mid: number
+    lo: number
+    hi: number
+    axis: 'v' | 'h'
+  }
+
+  const stripBandKey = (coord: number) => Math.floor(coord / stripGroupWidthM) * stripGroupWidthM
+
+  const axisSegs: AxisSeg[] = []
+  for (let i = 0; i < pieces.length; i++) {
+    const w = pieces[i]!
+    if (w.mapping.target.kind === 'wall' && w.mapping.target.variant === 'column_outline') {
+      continue
+    }
+    const [sx, sy] = transformPoint(w.seg.x0, w.seg.y0, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const [ex, ey] = transformPoint(w.seg.x1, w.seg.y1, opts.ox, opts.oy, opts.scale, opts.offset, opts.flipX, opts.flipY)
+    const dx = ex - sx
+    const dy = ey - sy
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) {
+      continue
+    }
+    const isVert = Math.abs(dx) / len <= sinAxis
+    const isHoriz = Math.abs(dy) / len <= sinAxis
+    if (isVert) {
+      const xMid = (sx + ex) / 2
+      axisSegs.push({
+        idx: i,
+        len,
+        mid: xMid,
+        lo: Math.min(sy, ey),
+        hi: Math.max(sy, ey),
+        axis: 'v',
+      })
+    } else if (isHoriz) {
+      const yMid = (sy + ey) / 2
+      axisSegs.push({
+        idx: i,
+        len,
+        mid: yMid,
+        lo: Math.min(sx, ex),
+        hi: Math.max(sx, ex),
+        axis: 'h',
+      })
+    }
+  }
+
+  const groups = new Map<string, AxisSeg[]>()
+  for (const a of axisSegs) {
+    const w = pieces[a.idx]!
+    const layer = canonicalDxfLayerName(w.seg.layer)
+    const band = a.axis === 'v' ? stripBandKey(a.mid) : stripBandKey(a.mid)
+    const key = `${w.levelIndex}::${layer}::${a.axis}::${band}`
+    const list = groups.get(key) ?? []
+    list.push(a)
+    groups.set(key, list)
+  }
+
+  const removeIdx = new Set<number>()
+  for (const list of groups.values()) {
+    if (list.length < 2) {
+      continue
+    }
+    for (const short of list) {
+      if (removeIdx.has(short.idx)) {
+        continue
+      }
+      for (const long of list) {
+        if (short.idx === long.idx || removeIdx.has(long.idx)) {
+          continue
+        }
+        if (long.len <= short.len + 1e-4) {
+          continue
+        }
+        const sep = Math.abs(short.mid - long.mid)
+        if (sep > maxNormalSepM) {
+          continue
+        }
+        if (short.lo < long.lo - axisContainTolM || short.hi > long.hi + axisContainTolM) {
+          continue
+        }
+        removeIdx.add(short.idx)
+        break
+      }
+    }
+  }
+
+  const merged = pieces.filter((_, i) => !removeIdx.has(i))
+  return { merged, removed: removeIdx.size }
+}

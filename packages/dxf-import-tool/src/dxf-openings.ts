@@ -204,6 +204,26 @@ export function dxfInsertLocalAxesInScene(
 }
 
 /**
+ * 洞口宽度在平面上的方向（弧度），仅由块 sx/sy 与旋转决定（|sx|≥|sy| 则宽度沿块局部 +X）。
+ * 与 `inferDoorSwingFromDxfInsert` 中相对墙切向选轴不同，此处**不**依赖墙几何，供窗挂接/合成墙朝向使用。
+ */
+export function openingWidthAxisAngleFromScaleOnly(
+  ins: PlanInsert,
+  opts: Pick<OpeningTransformOpts, 'flipX' | 'flipY'>,
+): number {
+  const { ux, uy, vx, vy } = dxfInsertLocalAxesInScene(ins, opts)
+  const widthOnBlockX = Math.abs(ins.sx) >= Math.abs(ins.sy)
+  let wx = widthOnBlockX ? ux : vx
+  let wy = widthOnBlockX ? uy : vy
+  const widthMirror = widthOnBlockX ? ins.sx < 0 : ins.sy < 0
+  if (widthMirror) {
+    wx = -wx
+    wy = -wy
+  }
+  return Math.atan2(wy, wx)
+}
+
+/**
  * 从 ATTRIB 关键词补充或覆盖（若图纸写了「左开/右开」「内/外开」等）。
  */
 function doorSwingHintsFromAttribs(ins: PlanInsert): Partial<DoorSwingFromDxf> {
@@ -326,10 +346,24 @@ const T_SEGMENT_LO = -0.02
 const T_SEGMENT_HI = 1.02
 /** 合成短墙：到最近墙段（有限线段）的距离上限 */
 const TOL_NEAREST_SEGMENT = 0.55
+/**
+ * 窗（WIN2D）：洞口宽度方向与墙段切向的余弦绝对值低于此值则不挂接到该墙（避免水平窗符号贴到竖向结构墙中心线）。
+ * 约 0.5 表示夹角大于 ~60° 即不挂接；正交时≈0 → 走合成短墙（沿 {@link openingWidthAxisAngleFromScaleOnly}）。
+ */
+const WINDOW_ATTACH_MIN_ALIGN_COS = 0.5
 /** 两个挂接门窗场景距离小于此值且落在互相垂直的墙段上时，合并到同一墙段（避免墙角双面各挂一扇、子节点相互垂直；同立面相邻窗常相距 ~0.6–1.2m） */
 const CLUSTER_CORNER_ATTACH_M = 1.35
 /** 两条平行短墙段上、平面距离小于此值的门窗合并到同一段（随后可拉长中心线包住洞口） */
 const CLUSTER_PARALLEL_FACADE_ATTACH_M = 2.5
+
+function windowWidthAlignedWithWallSegment(
+  ins: PlanInsert,
+  thetaSeg: number,
+  opts: Pick<OpeningTransformOpts, 'flipX' | 'flipY'>,
+): boolean {
+  const widthRad = openingWidthAxisAngleFromScaleOnly(ins, opts)
+  return Math.abs(Math.cos(widthRad - thetaSeg)) >= WINDOW_ATTACH_MIN_ALIGN_COS
+}
 
 /**
  * 将 INSERT 投影到指定墙段上，逻辑与 matchOpeningsToWalls 主循环一致：先段内投影 + 无限长墙线距离，否则有限线段距离。
@@ -482,6 +516,13 @@ function fixCornerAttachClusters(
         continue
       }
 
+      if (
+        (oa.kind === 'window' && !windowWidthAlignedWithWallSegment(oa.insert, segmentTheta(chosen), opts)) ||
+        (ob.kind === 'window' && !windowWidthAlignedWithWallSegment(ob.insert, segmentTheta(chosen), opts))
+      ) {
+        continue
+      }
+
       const widthA = openingWidthMetersFromInsert(oa.insert.sx, oa.insert.sy, opts.unitToMeters)
       const widthB = openingWidthMetersFromInsert(ob.insert.sx, ob.insert.sy, opts.unitToMeters)
 
@@ -597,10 +638,22 @@ function fixParallelFacadeAttachClusters(
       }
 
       if (chosen !== null && projOa && projOb) {
-        oa.wallIndex = chosen
-        ob.wallIndex = chosen
-        oa.localX = clampedLocalXOpening(projOa.len, widthA, projOa.tClamped)
-        ob.localX = clampedLocalXOpening(projOb.len, widthB, projOb.tClamped)
+        const alignOk =
+          (oa.kind !== 'window' || windowWidthAlignedWithWallSegment(oa.insert, segmentTheta(chosen), opts)) &&
+          (ob.kind !== 'window' || windowWidthAlignedWithWallSegment(ob.insert, segmentTheta(chosen), opts))
+        if (alignOk) {
+          oa.wallIndex = chosen
+          ob.wallIndex = chosen
+          oa.localX = clampedLocalXOpening(projOa.len, widthA, projOa.tClamped)
+          ob.localX = clampedLocalXOpening(projOb.len, widthB, projOb.tClamped)
+        }
+        continue
+      }
+
+      const alignShorter =
+        (oa.kind !== 'window' || windowWidthAlignedWithWallSegment(oa.insert, segmentTheta(shorter), opts)) &&
+        (ob.kind !== 'window' || windowWidthAlignedWithWallSegment(ob.insert, segmentTheta(shorter), opts))
+      if (!alignShorter) {
         continue
       }
 
@@ -677,6 +730,8 @@ export function matchOpeningsToWalls(
     const [px, pz] = tpScene(ins.bx, ins.by, insLevel, baseOpts)
 
     const rScene = dxfInsertSceneRotationRad(ins, baseOpts)
+    /** 窗：挂接评分用洞口宽度轴与墙切向对齐；门：仍用块 +X 朝向 */
+    const alignRadForScore = kind === 'window' ? openingWidthAxisAngleFromScaleOnly(ins, baseOpts) : rScene
 
     let bestInterior: { wi: number; distLine: number; tParam: number; len: number; score: number } | null = null
     for (let wi = 0; wi < flatWallPieces.length; wi++) {
@@ -700,7 +755,10 @@ export function matchOpeningsToWalls(
         continue
       }
       const thetaSeg = Math.atan2(ey - sy, ex - sx)
-      const score = distLine + ATTACH_ANGLE_ALIGN_WEIGHT_M * openingAngleAlignPenalty(rScene, thetaSeg)
+      if (kind === 'window' && !windowWidthAlignedWithWallSegment(ins, thetaSeg, baseOpts)) {
+        continue
+      }
+      const score = distLine + ATTACH_ANGLE_ALIGN_WEIGHT_M * openingAngleAlignPenalty(alignRadForScore, thetaSeg)
       const better =
         !bestInterior ||
         score < bestInterior.score - 1e-9 ||
@@ -736,7 +794,10 @@ export function matchOpeningsToWalls(
           continue
         }
         const thetaSeg = Math.atan2(ey - sy, ex - sx)
-        const score = dist + ATTACH_ANGLE_ALIGN_WEIGHT_M * openingAngleAlignPenalty(rScene, thetaSeg)
+        if (kind === 'window' && !windowWidthAlignedWithWallSegment(ins, thetaSeg, baseOpts)) {
+          continue
+        }
+        const score = dist + ATTACH_ANGLE_ALIGN_WEIGHT_M * openingAngleAlignPenalty(alignRadForScore, thetaSeg)
         const better =
           !bestNear ||
           score < bestNear.score - 1e-9 ||
@@ -777,9 +838,10 @@ export function matchOpeningsToWalls(
       len: number
     } | null = null
 
-    /** 合成短墙中心线与天正块宽（INSERT 组码 50 + flip）一致；门窗为子节点，不再单独写 rotation */
-    const ux = Math.cos(rScene)
-    const uz = Math.sin(rScene)
+    /** 合成短墙：窗沿洞口宽度方向；门沿块 +X 朝向（与挂接评分一致） */
+    const syntheticDirRad = kind === 'window' ? openingWidthAxisAngleFromScaleOnly(ins, baseOpts) : rScene
+    const ux = Math.cos(syntheticDirRad)
+    const uz = Math.sin(syntheticDirRad)
 
     for (let wi = 0; wi < flatWallPieces.length; wi++) {
       const wp = flatWallPieces[wi]!

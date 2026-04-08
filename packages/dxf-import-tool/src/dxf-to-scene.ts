@@ -55,6 +55,7 @@ import {
 import {
   mergeColinearGapWallPiecesIterative,
   mergeDoubleWallLineSegments,
+  removeContainedParallelFragments,
   removeRedundantCornerStubs,
 } from './merge-double-wall-lines.ts'
 
@@ -454,6 +455,7 @@ function buildSceneGraph(
   let colinearGapPiecesReduced = 0
   let colinearGapMergePasses = 0
   let redundantCornerStubsRemoved = 0
+  let containedParallelFragmentsRemoved = 0
   {
     const col = mergeColinearGapWallPiecesIterative(wallPieces, {
       ox,
@@ -489,6 +491,20 @@ function buildSceneGraph(
     wallPieces = stub.merged
   }
   const wallPiecesAfterStubRemoval = wallPieces.length
+  {
+    const fr = removeContainedParallelFragments(wallPieces, {
+      ox,
+      oy,
+      scale,
+      offset: opts.offset,
+      flipX: opts.flipX,
+      flipY: opts.flipY,
+      axisAlignRad: (opts.colinearGapMergeAxisAlignDeg * Math.PI) / 180,
+    })
+    containedParallelFragmentsRemoved = fr.removed
+    wallPieces = fr.merged
+  }
+  const wallPiecesAfterContainedParallel = wallPieces.length
 
   let columnOutlineRectanglesMerged = 0
   {
@@ -588,6 +604,9 @@ function buildSceneGraph(
   if (redundantCornerStubsRemoved > 0) {
     siteMeta.redundantCornerStubsRemoved = redundantCornerStubsRemoved
   }
+  if (containedParallelFragmentsRemoved > 0) {
+    siteMeta.containedParallelFragmentsRemoved = containedParallelFragmentsRemoved
+  }
   if (columnOutlineRectanglesMerged > 0) {
     siteMeta.columnOutlineRectanglesMerged = columnOutlineRectanglesMerged
   }
@@ -625,6 +644,7 @@ function buildSceneGraph(
   siteMeta.wallPipelinePiecesAfterDoubleMerge = wallPiecesAfterDoubleMerge
   siteMeta.wallPipelinePiecesAfterColinearGap = wallPiecesAfterColinearGap
   siteMeta.wallPipelinePiecesAfterStubRemoval = wallPiecesAfterStubRemoval
+  siteMeta.wallPipelinePiecesAfterContainedParallel = wallPiecesAfterContainedParallel
   siteMeta.wallPipelineGeometricPiecesBeforeOpenings = geometricWallPiecesBeforeOpenings
   siteMeta.wallPipelineSyntheticOpeningWalls = syntheticOpeningWallCount
   if (taggedWallSegmentCount > 0) {
@@ -1197,8 +1217,12 @@ async function main() {
     const geomNum = typeof g === 'number' ? g : 0
     const red = t > 0 ? ((t - geomNum) / t) * 100 : 0
     const ret = t > 0 ? (geomNum / t) * 100 : 0
+    const afterContained =
+      typeof pm.wallPipelinePiecesAfterContainedParallel === 'number'
+        ? pm.wallPipelinePiecesAfterContainedParallel
+        : pm.wallPipelinePiecesAfterStubRemoval
     console.error(
-      `Wall pipeline (geometry vs tagged LINE segments): tagged ${t} → double-merge ${pm.wallPipelinePiecesAfterDoubleMerge} → colinear ${pm.wallPipelinePiecesAfterColinearGap} → stub ${pm.wallPipelinePiecesAfterStubRemoval} → before openings ${geomNum} | reduction ${red.toFixed(1)}% of tagged, retention ${ret.toFixed(1)}% (expecting ~2/3 reduction ⇒ retention ~33% only if most segments are redundant pairs/gaps on the same wall)`,
+      `Wall pipeline (geometry vs tagged LINE segments): tagged ${t} → double-merge ${pm.wallPipelinePiecesAfterDoubleMerge} → colinear ${pm.wallPipelinePiecesAfterColinearGap} → stub ${pm.wallPipelinePiecesAfterStubRemoval} → contained ${afterContained} → before openings ${geomNum} | reduction ${red.toFixed(1)}% of tagged, retention ${ret.toFixed(1)}% (expecting ~2/3 reduction ⇒ retention ~33% only if most segments are redundant pairs/gaps on the same wall)`,
     )
     if (syn > 0) {
       console.error(
