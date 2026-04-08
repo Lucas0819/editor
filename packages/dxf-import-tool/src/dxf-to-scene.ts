@@ -41,6 +41,7 @@ import {
   DXF_IMPORT_WINDOW_CENTER_Y,
   DXF_IMPORT_WINDOW_HEIGHT,
   groupAttachByWallIndex,
+  inferDoorSwingFromDxfInsert,
   matchOpeningsToWalls,
   type OpeningAttach,
   type OpeningSynthetic,
@@ -890,6 +891,10 @@ function buildSceneGraph(
         } else {
           const cid = nid('door')
           childIds.push(cid)
+          const doorSwing = inferDoorSwingFromDxfInsert(ins, sx, sy, ex, ey, {
+            flipX: opts.flipX,
+            flipY: opts.flipY,
+          })
           nodes[cid] = {
             object: 'node',
             id: cid,
@@ -908,6 +913,9 @@ function buildSceneGraph(
             width: op.widthM,
             height: DXF_IMPORT_DOOR_HEIGHT,
             ...DXF_IMPORT_DOOR_DEFAULTS,
+            hingesSide: doorSwing.hingesSide,
+            swingDirection: doorSwing.swingDirection,
+            handleSide: doorSwing.handleSide,
           }
         }
       }
@@ -968,6 +976,10 @@ function buildSceneGraph(
         }
       } else {
         cid = nid('door')
+        const doorSwing = inferDoorSwingFromDxfInsert(ins, sx, sy, ex, ey, {
+          flipX: opts.flipX,
+          flipY: opts.flipY,
+        })
         nodes[cid] = {
           object: 'node',
           id: cid,
@@ -987,6 +999,9 @@ function buildSceneGraph(
           width: syn.widthM,
           height: DXF_IMPORT_DOOR_HEIGHT,
           ...DXF_IMPORT_DOOR_DEFAULTS,
+          hingesSide: doorSwing.hingesSide,
+          swingDirection: doorSwing.swingDirection,
+          handleSide: doorSwing.handleSide,
         }
       }
       nodes[wid] = {

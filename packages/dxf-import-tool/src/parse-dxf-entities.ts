@@ -35,6 +35,8 @@ export type PlanInsert = {
   sy: number
   sz: number
   rotationDeg: number
+  /** INSERT 后 ATTRIB：组码 2=tag、1=value（天正等可能含开向文字） */
+  attribs?: Record<string, string>
 }
 
 function trimPair(line: string | undefined): string {
@@ -174,6 +176,24 @@ function parseLwPolylineEntity(
   return { segments: [], next: start }
 }
 
+/** 解析单个 ATTRIB 实体（从 code 0 ATTRIB 之后到下一 code 0 之前） */
+function parseAttribEntity(lines: string[], start: number): { tag: string; value: string; next: number } {
+  let i = start
+  let tag = ''
+  let value = ''
+  while (i < lines.length - 1) {
+    const code = Number(lines[i])
+    const val = lines[i + 1]
+    i += 2
+    if (code === 0) {
+      return { tag, value, next: i - 2 }
+    }
+    if (code === 2) tag = trimPair(val)
+    if (code === 1) value = trimPair(val)
+  }
+  return { tag, value, next: start }
+}
+
 function parseInsertEntity(
   lines: string[],
   start: number,
@@ -187,6 +207,7 @@ function parseInsertEntity(
   let sy = 1
   let sz = 1
   let rot = 0
+  const attribPairs: [string, string][] = []
   while (i < lines.length - 1) {
     const code = Number(lines[i])
     const val = lines[i + 1]
@@ -195,8 +216,10 @@ function parseInsertEntity(
       /** 下一实体以 code 0 开头：LINE / INSERT / … 均结束当前 INSERT（勿把「0 INSERT」当嵌套而 skip，否则会吞掉相邻块参照）。 */
       if (v === 'ATTRIB') {
         i += 2
-        while (i < lines.length - 1 && Number(lines[i]) !== 0) {
-          i += 2
+        const { tag, value, next } = parseAttribEntity(lines, i)
+        i = next
+        if (tag.length > 0 || value.length > 0) {
+          attribPairs.push([tag, value])
         }
         continue
       }
@@ -214,8 +237,10 @@ function parseInsertEntity(
         if (!Number.isFinite(rot)) {
           rot = 0
         }
+        const attribs =
+          attribPairs.length > 0 ? Object.fromEntries(attribPairs.filter(([t]) => t.length > 0)) : undefined
         return {
-          insert: { layer, blockName, bx, by, sx, sy, sz, rotationDeg: rot },
+          insert: { layer, blockName, bx, by, sx, sy, sz, rotationDeg: rot, attribs },
           next: i,
         }
       }
@@ -232,8 +257,10 @@ function parseInsertEntity(
       if (!Number.isFinite(rot)) {
         rot = 0
       }
+      const attribs =
+        attribPairs.length > 0 ? Object.fromEntries(attribPairs.filter(([t]) => t.length > 0)) : undefined
       return {
-        insert: { layer, blockName, bx, by, sx, sy, sz, rotationDeg: rot },
+        insert: { layer, blockName, bx, by, sx, sy, sz, rotationDeg: rot, attribs },
         next: i,
       }
     }

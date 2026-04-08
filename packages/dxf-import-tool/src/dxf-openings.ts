@@ -13,6 +13,13 @@ import type { PlanInsert } from './parse-dxf-entities.ts'
 
 export type OpeningKind = 'window' | 'door'
 
+/** 从 DXF 门 INSERT 推断的开门方向（与 `DoorNode` 的 hingesSide / swingDirection / handleSide 一致） */
+export type DoorSwingFromDxf = {
+  hingesSide: 'left' | 'right'
+  swingDirection: 'inward' | 'outward'
+  handleSide: 'left' | 'right'
+}
+
 /** 与 example/墙体内有门和窗.json 一致的墙局部竖向（窗中心高度） */
 export const DXF_IMPORT_WINDOW_CENTER_Y = 1.5
 export const DXF_IMPORT_WINDOW_HEIGHT = 1.5
@@ -173,6 +180,133 @@ export function dxfInsertSceneRotationRad(insert: PlanInsert, opts: OpeningTrans
   const vx = (opts.flipX ? -1 : 1) * cosR
   const vy = (opts.flipY ? -1 : 1) * sinR
   return Math.atan2(vy, vx)
+}
+
+/**
+ * 块局部轴在场景平面上的单位方向（与 DXF 一致：先块比例再转角，再平面 flip）。
+ * +X = 门洞宽度常见方向；+Y = 天正等平面门块开扇弧所在侧（向「室内」摆动的一侧）。
+ */
+export function dxfInsertLocalAxesInScene(
+  insert: PlanInsert,
+  opts: Pick<OpeningTransformOpts, 'flipX' | 'flipY'>,
+): { ux: number; uy: number; vx: number; vy: number } {
+  const fx = opts.flipX ? -1 : 1
+  const fy = opts.flipY ? -1 : 1
+  const r = (insert.rotationDeg * Math.PI) / 180
+  const c = Math.cos(r)
+  const s = Math.sin(r)
+  return {
+    ux: fx * c,
+    uy: fy * s,
+    vx: -fx * s,
+    vy: fy * c,
+  }
+}
+
+/**
+ * 从 ATTRIB 关键词补充或覆盖（若图纸写了「左开/右开」「内/外开」等）。
+ */
+function doorSwingHintsFromAttribs(ins: PlanInsert): Partial<DoorSwingFromDxf> {
+  const chunks: string[] = []
+  if (ins.attribs) {
+    for (const [k, v] of Object.entries(ins.attribs)) {
+      chunks.push(k, v)
+    }
+  }
+  const s = chunks.join(' ')
+  const out: Partial<DoorSwingFromDxf> = {}
+  if (/右开|右扇|向\s*右|RIGHT\s*HINGE|HINGE\s*RIGHT/i.test(s)) {
+    out.hingesSide = 'right'
+  } else if (/左开|左扇|向\s*左|LEFT\s*HINGE|HINGE\s*LEFT/i.test(s)) {
+    out.hingesSide = 'left'
+  }
+  if (/外开|向外|OUT\s*SWING|SWING\s*OUT/i.test(s)) {
+    out.swingDirection = 'outward'
+  } else if (/内开|向内|IN\s*SWING|SWING\s*IN/i.test(s)) {
+    out.swingDirection = 'inward'
+  }
+  return out
+}
+
+/**
+ * 根据门 INSERT 与墙段中心线（楼层平面 X–Z，与 `WallNode.start/end` 同坐标系）推断开门方向。
+ * - 宽度轴：与墙切向更对齐的块局部轴（X 或 Y）；`sx`/`sy` 负镜像参与铰链侧。
+ * - 摆动方向：块开扇深度向量与**墙切向的左法向**点积符号 → inward/outward。
+ *   左法向 **(-ty, tx)** 与编辑器 `getOpeningFootprint` 的 `perp = (-dirZ, dirX)` 一致。
+ *   若误用 **(sin θ, cos θ)=(ty, tx)**，在**竖直墙**（t≈(0,±1)）上与左法向相反，会出现内外开与平面图门弧相反。
+ */
+export function inferDoorSwingFromDxfInsert(
+  ins: PlanInsert,
+  wallSx: number,
+  wallSy: number,
+  wallEx: number,
+  wallEy: number,
+  opts: Pick<OpeningTransformOpts, 'flipX' | 'flipY'>,
+): DoorSwingFromDxf {
+  const hints = doorSwingHintsFromAttribs(ins)
+  const tw = wallEx - wallSx
+  const th = wallEy - wallSy
+  const len = Math.hypot(tw, th)
+  if (len < 1e-9) {
+    const hingesSide = hints.hingesSide ?? 'left'
+    const swingDirection = hints.swingDirection ?? 'inward'
+    return {
+      hingesSide,
+      swingDirection,
+      handleSide: hingesSide === 'left' ? 'right' : 'left',
+    }
+  }
+  const tx = tw / len
+  const ty = th / len
+  const { ux, uy, vx, vy } = dxfInsertLocalAxesInScene(ins, opts)
+  const dotW = ux * tx + uy * ty
+  const dotV = vx * tx + vy * ty
+  const widthOnBlockX = Math.abs(dotW) >= Math.abs(dotV)
+
+  let wx = widthOnBlockX ? ux : vx
+  let wy = widthOnBlockX ? uy : vy
+  const widthMirror = widthOnBlockX ? ins.sx < 0 : ins.sy < 0
+  if (widthMirror) {
+    wx = -wx
+    wy = -wy
+  }
+  const dotWidth = wx * tx + wy * ty
+  let hingesSide: 'left' | 'right'
+  if (hints.hingesSide !== undefined) {
+    hingesSide = hints.hingesSide
+  } else {
+    hingesSide = dotWidth > 0 ? 'left' : 'right'
+  }
+
+  let ddx: number
+  let ddy: number
+  if (widthOnBlockX) {
+    ddx = vx
+    ddy = vy
+    if (ins.sy < 0) {
+      ddx = -ddx
+      ddy = -ddy
+    }
+  } else {
+    ddx = ux
+    ddy = uy
+    if (ins.sx < 0) {
+      ddx = -ddx
+      ddy = -ddy
+    }
+  }
+  const nwx = -ty
+  const nwy = tx
+  const inwardDot = ddx * nwx + ddy * nwy
+  let swingDirection: 'inward' | 'outward'
+  if (hints.swingDirection !== undefined) {
+    swingDirection = hints.swingDirection
+  } else {
+    swingDirection = inwardDot >= 0 ? 'inward' : 'outward'
+  }
+
+  const handleSide: 'left' | 'right' = hingesSide === 'left' ? 'right' : 'left'
+  return { hingesSide, swingDirection, handleSide }
 }
 
 /** 投影落在段内时，到无限长墙线的垂直距离上限 */
