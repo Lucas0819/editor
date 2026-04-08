@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dxf-to-scene": "bun run src/dxf-to-scene.ts",
-    "dxf-preview": "bun run src/dxf-preview.ts"
+    "dxf-preview": "bun run src/dxf-preview.ts",
+    "dxf-text-search": "bun run src/dxf-text-search.ts"
   }
 }

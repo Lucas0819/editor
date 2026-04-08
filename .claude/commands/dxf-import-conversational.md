@@ -34,17 +34,48 @@ bun run packages/dxf-import-tool/src/dxf-preview.ts --input "$ARGUMENTS" --sampl
 
 - **预读算法**（解析 DXF、统计、抽样）在 `packages/dxf-import-tool/src/dxf-preview.ts`；Skill **内置**的是**稳定调用入口** `scripts/dxf-preview.sh`，便于 Agent 在任意工作目录下一条命令得到结果。
 - **Claude Code / Cursor Agent**：执行上述命令后，**读取 stdout 的 JSON**，据此向用户解释图层、抽样与 `cliHints`，并整理待确认的 CLI 参数——**不要在未运行命令时编造统计**。
+- **禁止**为「预读」**新写或执行**临时 Python、`ezdxf`、独立 Node 脚本等替代方案。预读**只能**通过本节给出的 `dxf-preview.sh` 或 `bun run …/dxf-preview.ts` 完成；若命令失败，应修正**仓库根路径**、`--input` 绝对路径、`bun` 可用性后重试，**不要**换语言重写解析流程。
 
 将 **stdout 的 JSON** 作为事实来源：其中含门窗与墙段的**确定性抽样**（每类最多 `--sample` 条）、墙段长度分位数（米）、`cliHints`、`layerTableNames`、`layersInGeometry` 等。
+
+### 1.1 按关键词检索 TEXT/MTEXT 坐标（多楼层锚点，可选）
+
+在已跑 **§1 预读**、掌握 `layerTableNames` 之后，若需根据**楼层标题文字**得到插入点（填 `floorPlan.levels`），Agent 应：
+
+1. **自行从图层名中判断**哪些层可能承载楼层名称（语义 + 可问用户）；**不要**在脚本里写死统一图层名。
+2. 由 Agent 提供 **一个或多个关键词**（子串匹配，默认不区分大小写），以及可选的 **`--layer` 白名单**（与预读中的字符串**完全一致**，含 xref 前缀时须写全名）。
+3. 执行仓库内 **`dxf-text-search`**（仅此入口；**不要**手写 Python 抽 TEXT）：
+
+```bash
+bash .cursor/skills/dxf-import-conversational/scripts/dxf-text-search.sh \
+  --input "$ARGUMENTS" \
+  --keyword "平面" \
+  --keyword "屋顶" \
+  --layer "楼层名称"
+```
+
+**等价命令**（在仓库根目录）：
+
+```bash
+bun run packages/dxf-import-tool/src/dxf-text-search.ts \
+  --input "$ARGUMENTS" \
+  --keyword "平面" \
+  --layer "楼层名称"
+```
+
+- 可重复 `--keyword`（命中**任一**子串即收录该条）；可重复 `--layer`（**任一**图层匹配）；`--max-matches` 限制条数（默认 10000）。  
+- stdout 为 JSON：`matches[]` 含 `kind`、`layer`、`text`、`x`/`y`/`z`（DXF 插入点）、`matchedKeyword`。仅扫描 **ENTITIES** 段，不展开块定义内文字。
 
 ## 2. 图层 mapping（第一次与用户确认）
 
 1. 完整阅读并按步骤执行  
    `packages/dxf-import-tool/AGENT_LAYER_MAPPING_PROMPT.md`  
    输出根级含 `"version": 1`、`"layers"`；若图纸为**多楼层纵向/横向排布**，必须给出 **`floorPlan.levels` 非空数组**（每层含 `levelIndex`、`labels`、`range` 等，见 prompt），且 **`levelCount === levels.length`**。  
-   **禁止**只写 `levelCount` 与文字说明、把 `levels` 留空——否则 `dxf-to-scene` 会把全图归为**单层**。若暂时无法从 DXF 推出各带 `range`，应**向用户说明**须补充「楼层名称」等 TEXT 的坐标或手工分界，**不得**用空 `levels` 冒充多楼层已完成。
+   **禁止**只写 `levelCount` 与文字说明、把 `levels` 留空——否则 `dxf-to-scene` 会把全图归为**单层**。若暂时无法从 DXF 推出各带 `range`，应**向用户说明**须补充楼层标题类 TEXT 的图层/坐标或手工分界（图层名因项目而异，见下条），**不得**用空 `levels` 冒充多楼层已完成。
 2. 把 `dxf-preview` 中的图层名、几何层、门窗样本与 `openingBlockHistogramOther` 对齐到 `layers`，在对话里用简短中文说明**低置信度**的层。大图须按 prompt 从 DXF 或预读结果中列出与楼层相关的 TEXT，再填 `floorPlan.levels` 的 **DXF 原始坐标**区间。
-3. **暂停**：请用户确认或逐条修改 mapping；用户改完后，将**最终** JSON 存成文件（例如 `layer-mapping.json`），必要时用该文件**重跑**上一节 `dxf-preview --mapping-file` 以刷新统计。
+3. **楼层标题图层与 TEXT（图层名因项目而异；用 §1.1 官方脚本）**  
+   各项目用于楼层名称/标题的**图层名不固定**（例如 A 图「楼层名称」、B 图「楼层名」、C 图 `floorname` 等）。Agent 应：以 `dxf-preview` 的 `layerTableNames`、`layersInGeometry` 为候选，**语义推断**（+ 可问用户）候选层名与检索关键词，再按 **§1.1** 运行 **`dxf-text-search`** 得到各 TEXT 的坐标与内容。**禁止**为抽 TEXT 写临时 Python/`ezdxf`/一次性解析脚本；**允许**的仅有 **`dxf-text-search.ts` / `dxf-text-search.sh`**。若未跑检索、仅人工核对少量字，可对 ASCII `.dxf` **Read 局部**或问用户。
+4. **暂停**：请用户确认或逐条修改 mapping；用户改完后，将**最终** JSON 存成文件（例如 `layer-mapping.json`），必要时用该文件**重跑**上一节 `dxf-preview --mapping-file` 以刷新统计。
 
 ## 3. CLI 参数（第二次与用户确认）
 
@@ -130,6 +161,8 @@ cd "/绝对路径/仓库根" && bun dev
 
 ## 约束
 
+- **预读**仅使用 §1 的 CLI（`dxf-preview.sh` / `dxf-preview.ts`），**不要**用 Python 或其它一次性脚本做 DXF 抽样或统计。
+- **`floorPlan` / 楼层 TEXT 锚点**：使用 **§1.1 `dxf-text-search`**（Agent 提供 `--keyword` / `--layer`）；**不要**用临时 Python 抽 TEXT。图层名以预读为准、因项目而异。
 - 在用户确认 mapping 与 CLI 前，**不要**执行 `dxf-to-scene.ts`。
 - **仅在用户明确同意预览后**再启动 `bun dev`；启动前用 §5.2 检测 **3002** 是否已占用，已占用则**不得**重复启动。
 - 不要编造 `dxf-preview` 未给出的统计；大图以 CLI 预读为准。

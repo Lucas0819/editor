@@ -7,8 +7,8 @@
 ## 用户消息模板（可附在每次任务末尾）
 
 ```text
-请按 AGENT_LAYER_MAPPING_PROMPT 的规则，分析附件/下方的 DXF，输出完整 JSON（version=1，含 layers 与 floorPlan）。
-若文件过大，请先列出 LAYER 表与 ENTITIES 中与楼层相关的 TEXT，再推断 floorPlan.levels 的 range（DXF 原始坐标）。
+请按 AGENT_LAYER_MAPPING_PROMPT 的规则，结合 **dxf-preview 输出的 JSON**（若在本仓库交互式流程中，必须先跑预读）与项目实际图层名，输出完整 JSON（version=1，含 layers 与 floorPlan）。
+若文件过大，勿依赖附件 DXF 全文；从预读的 layerTableNames / layersInGeometry 推断候选层；需要批量 TEXT 坐标时，使用仓库内 **`dxf-text-search`**（`OPERATIONS.md`）：由 Agent 提供 `--keyword` 与可选 `--layer`，**不要**用临时 Python 从 ENTITIES 抽 TEXT。再推断 floorPlan.levels 的 range（DXF 原始坐标）。
 ```
 
 ---
@@ -30,7 +30,7 @@
 - 图层名可能含 **xref 前缀**（`…$0$A-WALL`）；分析时同时考虑**完整名**与「最后一个 `$` 之后」的**规范层名**（与 `canonicalDxfLayerName` 一致）。
 - 多楼层常见形态：
   - **纵向排布**：多层平面沿 **Y**（或 X）铺开，每层占一段区间；可能有 **TEXT** 标注「一层平面图」「二层…」等。
-  - **专用楼层标题层**：例如图层名为 **`楼层名称`** 的 TEXT，可作为锚点。
+  - **专用楼层标题层**：某图层上放置楼层名称类 TEXT 作为锚点；**图层名因项目而异**（如「楼层名称」「楼层名」、`floorname` 等），**不要**在脚本里写死某一字符串；须结合图层表语义推断或询问制图方。
   - **标高分层**：各层 **Z** 或 LWPOLYLINE **标高** 不同（较少与纵向排布同时出现）。
 
 ---
@@ -59,7 +59,7 @@
      - **`range`**：`{ "xMin"?, "xMax"?, "yMin"?, "yMax"?, "zMin"?, "zMax"? }`，未确定的维可省略或置 `null`。
      - **`confidence`**：`high` | `medium` | `low`。
      - **`source`**：`text_anchors` | `geometry_extent` | `mixed` | `unknown`。
-     - **`notes`**：简述如何得到该范围（例如「由图层 楼层名称 下 TEXT 的组码 10/20 与相邻层中点分界」）。
+     - **`notes`**：简述如何得到该范围（例如「由某楼层标题图层（具体名以本图为准）下 TEXT 的组码 10/20 与相邻层中点分界」）。
 
 5. **分界推导（建议）**  
    - 若有 **楼层标题 TEXT**：读取其插入点 **Y**（或 X），排序后取相邻标题 **中点** 作为层间分界线，得到每层的 **yMin/yMax**（最下/最上层的开放边界可用图纸包络或 `HEADER` `$EXTMIN`/`$EXTMAX` 辅助）。  
@@ -97,6 +97,13 @@
 ---
 
 ## 与 Cursor / Claude 的集成（如何「给关键词就自动读」）
+
+### 与本仓库「交互式导入」一致时的硬性约定
+
+- **先跑** `dxf-preview`（见 `OPERATIONS.md`「预读」），以 JSON 中的 **`layerTableNames`**、**`layersInGeometry`** 为图层候选。
+- 需要批量得到楼层标题 **TEXT/MTEXT 的插入点与字符串**时，使用 **`dxf-text-search`**（同 `OPERATIONS.md`）：Agent 先**语义选定**候选图层名与**关键词**（`--keyword`，可多个），再 `--layer` 过滤；**禁止**为此编写临时 Python/`ezdxf`/一次性解析脚本。
+- 若只需核对少量字，可 **Read** ASCII `.dxf` 局部或问用户。
+- 楼层标题图层名**无统一命名**；下文示例「楼层名称」仅为**一种**常见写法。
 
 1. **交互式整流程（推荐）**  
    若用户要**先确认再转换**（预读 mapping、可改、再建议 CLI、最后执行 `dxf-to-scene`）：使用 Cursor skill **`.cursor/skills/dxf-import-conversational/SKILL.md`**，并配合预读脚本 **`src/dxf-preview.ts`**（见 `OPERATIONS.md`「预读」小节）。Skill 会要求 Agent 先跑 `dxf-preview` 再与用户确认。

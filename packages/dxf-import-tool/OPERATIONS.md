@@ -34,6 +34,34 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-preview.ts \
 - `--sample`：每类（门 INSERT、窗 INSERT、映射为墙之线段）最多抽样条数，默认 `10`。  
 - 与 **`.cursor/skills/dxf-import-conversational/SKILL.md`** 配合时，Agent 可先执行 **方式 A** 再进入确认流程；stdout 为 JSON，供 Claude Code 解析并整理参数建议。
 
+## TEXT/MTEXT 关键词检索（mapping / 楼层锚点）
+
+在已有 **预读 JSON**（含 `layerTableNames`）的前提下，由 Agent **语义选定**候选图层名，并传入**检索关键词**（子串，可多个），从 **ENTITIES** 中的 TEXT、MTEXT 得到**插入点坐标**与全文，用于填写 `floorPlan.levels` 等。**不要**用临时 Python 解析 DXF；请使用本工具：
+
+**方式 A（Skill 内脚本）：**
+
+```bash
+bash /path/to/editor/.cursor/skills/dxf-import-conversational/scripts/dxf-text-search.sh \
+  --input "/path/to/图纸.dxf" \
+  --keyword "平面" \
+  [--keyword "屋顶"] \
+  [--layer "楼层名称"] \
+  [--max-matches 10000]
+```
+
+**方式 B（包内入口）：**
+
+```bash
+bun run /path/to/editor/packages/dxf-import-tool/src/dxf-text-search.ts \
+  --input "/path/to/图纸.dxf" \
+  --keyword "平面" \
+  --layer "楼层名称"
+```
+
+- **`--keyword` / `-k`**：可重复；**任一**关键词以子串形式命中即收录该条（默认**不区分大小写**；需要区分时加 `--case-sensitive`）。  
+- **`--layer` / `-l`**：可重复；若指定，则仅保留**图层名**与其中**任一条**完全一致的实体（须与预读 / LAYER 表里的字符串一致，含 xref 前缀时要写全名）。  
+- stdout 为 JSON：`textEntityCount`（全文 TEXT/MTEXT 总数）、`matches`（筛选结果，含 `x`/`y`/`z`、`text`、`layer`、`matchedKeyword`）。**不**解析 BLOCK 段内文字。
+
 ## 命令
 
 在任意目录执行均可，建议使用**绝对路径**指向 DXF 与输出 JSON。
