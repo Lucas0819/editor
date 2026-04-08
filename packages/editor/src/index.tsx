@@ -20,7 +20,11 @@ export type { PresetsAdapter, PresetsTab } from './contexts/presets-context'
 export { PresetsProvider } from './contexts/presets-context'
 export type { SaveStatus } from './hooks/use-auto-save'
 export type { SceneGraph } from './lib/scene'
-export { applySceneGraphToEditor } from './lib/scene'
+export {
+  applySceneGraphToEditor,
+  loadSceneFromLocalStorage,
+  saveSceneToLocalStorage,
+} from './lib/scene'
 export { default as useAudio } from './store/use-audio'
 export { type CommandAction, useCommandRegistry } from './store/use-command-registry'
 export type { FloorplanSelectionTool, SplitOrientation, ViewMode } from './store/use-editor'

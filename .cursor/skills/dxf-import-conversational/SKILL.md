@@ -116,15 +116,23 @@ cd "/绝对路径/仓库根" && bun dev
 
 ### 5.3 在页面中加载场景
 
-请用户在浏览器 **开发者工具 → Console** 执行（将 `<文件名>` 换成 §5.1 中的 basename，无路径前缀）：
+**优先（推荐）**：打开带 **query** 的编辑器首页，由应用自动 `fetch` 并写入 `localStorage`（见 `apps/editor` 与 `OPERATIONS.md`）。
 
-```js
-const g = await fetch('/demos/<文件名>.json').then((r) => r.json())
-localStorage.setItem('pascal-editor-scene', JSON.stringify(g))
-location.reload()
-```
+- 仅 basename（自动补 `.json`）：
 
-与 `packages/dxf-import-tool/OPERATIONS.md`「在编辑器里加载」一致。
+  `http://localhost:3002/?demo=<文件名不含路径>`
+
+  例：`--out` 为 `…/apps/editor/public/demos/from-dxf.json` → 给用户 **`http://localhost:3002/?demo=from-dxf`**
+
+- 或完整 demos 路径（需 URL 编码）：
+
+  `http://localhost:3002/?scene=` + `encodeURIComponent('/demos/from-dxf.json')`
+
+文件名含空格或特殊字符时，优先用 `scene` 参数或对 `demo` 的值做编码。
+
+**备选**：若用户无法使用 query，再提供 `OPERATIONS.md` 中的 **Console** `fetch` + `localStorage` + `reload` 片段。
+
+若预览时多楼层未竖向分开，首先检查 **JSON 是否含多个 `type: level` 节点**（取决于 mapping 里的 **`floorPlan`** 与 `dxf-to-scene` 导出）；非预览链接问题。可在编辑器工具栏切换 **Level Mode**（Stacked / Exploded 等）。
 
 ## 约束
 

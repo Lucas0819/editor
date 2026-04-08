@@ -350,6 +350,21 @@ pnpm dev
 
 ---
 
+## Loading a scene from `public/demos` (URL query)
+
+Place a SceneGraph JSON under `public/demos/` (e.g. output from `dxf-to-scene --out apps/editor/public/demos/from-dxf.json`). The home page resolves optional query parameters and fetches the file on load, then saves it to `localStorage` under `pascal-editor-scene`.
+
+| Query | Behavior |
+|-------|----------|
+| `demo` | Basename only: `?demo=from-dxf` → fetches `/demos/from-dxf.json` (adds `.json` if missing). |
+| `scene` | Full path: must be `/demos/<name>.json` (URL-encode when passing in the URL). |
+
+Invalid paths or failed fetches fall back to the last persisted scene in `localStorage`. Development server listens on port **3002** (`package.json` `dev` script).
+
+Implementation: `app/page.tsx` (`onLoad`), `lib/resolve-scene-query.ts`.
+
+---
+
 ## Key Files
 
 | Path | Description |

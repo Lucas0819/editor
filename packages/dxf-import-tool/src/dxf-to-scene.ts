@@ -5,10 +5,9 @@
  * Usage:
  *   bun run src/dxf-to-scene.ts --input ../../沈本大街.dxf --out ../../scene-from-dxf.json --max-walls 4000
  *
- * Load in editor: copy the JSON to apps/editor/public/demos/ (e.g. demos/from-dxf.json), then in devtools:
- *   const g = await fetch('/demos/from-dxf.json').then((r) => r.json())
- *   localStorage.setItem('pascal-editor-scene', JSON.stringify(g))
- *   location.reload()
+ * Load in editor: copy the JSON to apps/editor/public/demos/ (e.g. demos/from-dxf.json), then either
+ *   open http://localhost:3002/?demo=from-dxf
+ *   or in devtools: fetch → localStorage → reload (see OPERATIONS.md).
  */
 
 import { randomBytes } from 'node:crypto'

@@ -109,9 +109,25 @@ bun run /path/to/editor/packages/dxf-import-tool/src/dxf-to-scene.ts \
 
 ## 在编辑器里加载
 
-1. 将生成的 JSON 放到 `apps/editor/public/demos/`（例如 `from-dxf.json`）。
-2. 启动 `bun dev`，打开编辑器页面。
-3. 浏览器开发者工具 Console 执行：
+1. 将生成的 JSON 放到 **`apps/editor/public/demos/`**（例如 `from-dxf.json`）。Agent 完成 `dxf-to-scene` 时应优先使用 `--out` 指向该目录，便于预览。
+2. 启动编辑器（仓库根目录 `bun dev`，默认 **http://localhost:3002**）。
+
+### 方式 A：URL query（推荐，适合 Agent 给用户一条链接）
+
+仅允许加载 **`/demos/` 下单层 `.json` 文件**（防路径穿越）。
+
+| 参数 | 说明 | 示例 URL |
+|------|------|----------|
+| `demo` | 仅文件名（可含空格等），缺省补 `.json` | `http://localhost:3002/?demo=from-dxf` → 请求 `/demos/from-dxf.json` |
+| `scene` | 完整静态路径，必须以 `/demos/` 开头、以 `.json` 结尾 | `http://localhost:3002/?scene=%2Fdemos%2Ffrom-dxf.json` |
+
+成功加载后，场景会写入 `localStorage`（`pascal-editor-scene`），与下方方式 B 持久化行为一致。
+
+多楼层竖向堆叠依赖 **SceneGraph 内存在多个 `level` 节点**（由 `dxf-to-scene` 与 mapping 中的 **`floorPlan`** 决定），与上述 URL 参数无关；若 JSON 只有一层，需在图层 mapping 中修正 `floorPlan` 后重新导出。
+
+### 方式 B：Console（无 query 或需覆盖本地缓存时）
+
+浏览器开发者工具 **Console** 执行：
 
 ```js
 const g = await fetch('/demos/from-dxf.json').then((r) => r.json())
